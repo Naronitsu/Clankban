@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clankban — local agent workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="features.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">C</span><span>clankban</span><span class="brand-local">LOCAL</span></div>
+      <div class="workspace-switcher"><div class="workspace-icon">A</div><div><strong>Atlas workspace</strong><small>Local board</small></div></div>
+      <nav class="primary-nav" aria-label="Views">
+        <button class="nav-item active" data-view="board"><span>▦</span> Board <span class="nav-count" id="navBoardCount">0</span></button>
+        <button class="nav-item" data-view="list"><span>☰</span> List</button>
+        <button class="nav-item" data-view="recent"><span>◷</span> Recent changes <span class="nav-count coral" id="navRecentCount">0</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="agent-status"><span class="status-dot" id="syncDot"></span><div><strong id="syncStatus">Connecting…</strong><small id="syncDetail"></small></div></div>
+    </aside>
+
+    <main class="main-content" id="board">
+      <header class="topbar"><div class="breadcrumbs"><span>Atlas workspace</span><b>/</b><strong id="viewTitle">Product board</strong></div><div class="top-actions"><button class="icon-button" id="refreshBoard" title="Refresh board (F5)">↻</button><button class="icon-button" id="focusSearch" title="Search (/)">⌕</button><button class="icon-button" id="openPalette" title="Command menu (Ctrl+K)">⌘K</button><button class="help-button" id="openHelp" title="Keyboard shortcuts (?)">?</button></div></header>
+      <section class="page-heading"><div><div class="eyebrow"><span class="live-dot"></span> LOCAL PROJECT</div><h1>Product board</h1><p>One visual source of truth for your work and your agents.</p></div><div class="heading-actions"><button class="button quiet" id="copyJson">↗ Copy agent JSON</button><button class="button primary" id="newTask">＋ New task</button></div></section>
+
+      <section class="stats-row" aria-label="Board summary">
+        <div class="stat-card"><div class="stat-icon violet">◒</div><div><span>Active work</span><strong id="activeCount">0</strong></div><em id="activeSub"></em></div>
+        <div class="stat-card"><div class="stat-icon orange">◷</div><div><span>Due in 7 days</span><strong id="dueCount">0</strong></div><em id="dueSub" class="warning"></em></div>
+        <div class="stat-card"><div class="stat-icon green">✓</div><div><span>Completed</span><strong id="completedCount">0</strong></div><em id="completedSub"></em></div>
+        <div class="stat-card"><div class="stat-icon blue">✦</div><div><span>Changed in 24h</span><strong id="recentCount">0</strong></div><em id="recentSub"></em></div>
+      </section>
+
+      <section class="board-toolbar"><div class="view-tabs"><button class="tab active" data-view="board">Board</button><button class="tab" data-view="list">List</button><button class="tab" data-view="recent">Recent</button></div><div class="toolbar-actions"><div class="search-box"><span>⌕</span><input id="searchInput" placeholder="Search tasks..." /></div><button class="filter-button" id="filterButton" aria-expanded="false">☷ <span>Filter</span><b id="filterBadge" hidden>0</b></button><select id="sortSelect" class="sort-select" aria-label="Sort tasks"><option value="priority">Priority</option><option value="created">Newest</option><option value="due">Due date</option></select></div></section>
+
+      <section class="filter-panel" id="filterPanel" hidden aria-label="Filters">
+        <label>Priority<select id="filterPriority"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+        <label>Type<select id="filterType"><option value="">Any</option><option value="epic">Epic</option><option value="task">Task</option><option value="subtask">Subtask</option><option value="bug">Bug fix</option></select></label>
+        <label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
+        <button class="button quiet" id="clearFilters" type="button">Clear</button>
+      </section>
+
+      <section class="board" id="boardGrid"></section>
+      <section class="list-view" id="listView" hidden></section>
+      <section class="recent-view" id="recentView" hidden></section>
+
+      <footer class="board-footer"><span><span class="kbd">Ctrl</span> + <span class="kbd">K</span> command menu · <span class="kbd">?</span> shortcuts</span><span id="footerStatus">Data stored locally <span class="local-pill">●</span></span></footer>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="task-drawer" id="taskDrawer" aria-label="Task details">
+    <div class="drawer-header"><span id="drawerType" class="type-badge task">TASK</span><button class="close-button" id="closeDrawer">×</button></div>
+    <div class="drawer-content"><div class="task-id" id="drawerId">AT-104</div><h2 id="drawerTitle">Task title</h2><p id="drawerDescription">Description</p><div class="drawer-meta" id="drawerMeta"></div><div class="drawer-section"><div class="section-heading"><span>Subtasks</span><span id="subtaskCount">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div></div><div class="drawer-section"><div class="section-heading">History</div><div class="activity-entry"><div class="mini-avatar purple">AI</div><div><strong>Last change</strong><p id="drawerUpdated">—</p></div></div></div></div>
+    <div class="drawer-footer"><button class="button danger quiet" id="deleteTask">Delete</button><button class="button quiet" id="editTask">Edit task</button></div>
+  </aside>
+
+  <div class="modal-backdrop" id="modalBackdrop"><form class="task-modal" id="taskForm"><div class="modal-header"><div><span class="eyebrow">WORK ITEM</span><h2 id="modalTitle">Create a task</h2></div><button type="button" class="close-button" id="closeModal">×</button></div><label>Title<input name="title" required placeholder="What needs to happen?" /></label><div class="form-grid"><label>Type<select name="type"><option value="task">Task</option><option value="epic">Epic</option><option value="bug">Bug fix</option><option value="subtask">Subtask</option></select></label><label>Priority<select name="priority"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label></div><div class="form-grid"><label>Status<select name="status"><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label><label>Due date<input type="date" name="due" /></label></div><label>Description<textarea name="description" rows="3" placeholder="Add context for teammates and agents..."></textarea></label><div class="modal-actions"><button type="button" class="button quiet" id="cancelModal">Cancel</button><button class="button primary" type="submit">Save work item</button></div></form></div>
+
+  <div class="json-modal-backdrop" id="jsonModalBackdrop"><div class="json-modal"><div class="modal-header"><div><span class="eyebrow">AGENT INTERFACE</span><h2>Board state as JSON</h2></div><button class="close-button" id="closeJson">×</button></div><p class="modal-note">This is the canonical local representation an agent can read, index, or update through the MCP bridge.</p><pre id="jsonOutput"></pre><div class="modal-actions"><button class="button primary" id="copyJsonModal">Copy JSON</button></div></div></div>
+
+  <div class="palette-backdrop" id="paletteBackdrop"><div class="palette" role="dialog" aria-label="Command menu"><input id="paletteInput" placeholder="Type a command…" autocomplete="off" /><ul id="paletteList"></ul></div></div>
+
+  <div class="modal-backdrop" id="helpBackdrop"><div class="task-modal help-modal"><div class="modal-header"><div><span class="eyebrow">KEYBOARD</span><h2>Shortcuts</h2></div><button type="button" class="close-button" id="closeHelp">×</button></div><table class="help-table"><tbody>
+    <tr><td><span class="kbd">Ctrl</span> + <span class="kbd">K</span></td><td>Open command menu</td></tr>
+    <tr><td><span class="kbd">/</span></td><td>Search tasks</td></tr>
+    <tr><td><span class="kbd">N</span></td><td>New task</td></tr>
+    <tr><td><span class="kbd">F5</span></td><td>Refresh board</td></tr>
+    <tr><td><span class="kbd">Esc</span></td><td>Close the open panel</td></tr>
+    <tr><td><span class="kbd">?</span></td><td>Show this list</td></tr>
+  </tbody></table></div></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

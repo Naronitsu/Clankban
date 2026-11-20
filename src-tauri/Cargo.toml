@@ -1,0 +1,21 @@
+[package]
+name = "clankban"
+version = "0.1.0"
+description = "A local-first visual workspace for humans and coding agents."
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+regex = "1"
+dirs = "5"
+ureq = { version = "2", features = ["json"] }
+percent-encoding = "2"

@@ -1,0 +1,11 @@
+# Legacy Electron/Node dependencies and build output
+node_modules/
+dist/
+
+# Local board backups contain task data; keep them out of version control
+backups/
+
+# Rust build output (see src-tauri/.gitignore for the full list)
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/gen/
