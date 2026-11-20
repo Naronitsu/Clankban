@@ -17,7 +17,7 @@ This is the handoff backlog for the local-first desktop application. Statuses us
 - [x] AT-011 Add Claude Code connection instructions and shared live API mode.
 - [x] AT-012 Add automatic five-second board refresh and manual refresh.
 - [x] AT-013 Add parent-child task links and display related child tasks in the drawer.
-- [x] Rewrite the runtime in Rust with Tauri 2 (`src-tauri/`): SQLite store, HTTP API, stdio MCP bridge, and the existing board UI moved to `ui/`. Unit tests, API smoke test, and MCP handshake pass. Desktop window launch is not yet verified on-screen. The Electron/Node runtime has been removed. No board ID yet.
+- [x] Rewrite the runtime in Rust with a native Slint window (`app/`): SQLite store, HTTP API, stdio MCP bridge with prompts and the run queue, signed in-app updates, and an NSIS installer. The earlier Tauri web-view UI and the Electron/Node runtime are gone. 31 unit tests pass, and the window was checked with screenshots. No board ID yet.
 
 ## Immediate next milestone: trustworthy delegation
 

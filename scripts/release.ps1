@@ -1,73 +1,79 @@
 # Builds a signed Clankban release and writes the files GitHub needs.
 #
 # Usage (from the project root):
-#   .\scripts\release.ps1 -Version 0.1.1
+#   .\scripts\release.ps1 -Version 0.2.0
 #
-# It does NOT publish. It prints the `gh release create` command to run once you
-# have checked the output in release\v<version>\.
+# It does NOT publish. It prints the `gh release create` command to run once you have
+# checked the output in release\v<version>\.
 #
 # Requirements:
-#   - The version is set to the same value in src-tauri\Cargo.toml and src-tauri\tauri.conf.json.
-#   - The updater private key exists at the path given by -KeyPath (created with
-#     `cargo tauri signer generate`). Keep it out of the repository.
+#   - The version is the same in app\Cargo.toml.
+#   - The signing key exists at -KeyPath (created with `cargo tauri signer generate`).
+#     Keep it out of the repository.
+#   - NSIS is installed. The default location is the one the Tauri CLI downloaded.
 
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$Repo = 'Naronitsu/Clankban',
-    [string]$KeyPath = (Join-Path $env:USERPROFILE '.tauri\clankban.key')
+    [string]$KeyPath = (Join-Path $env:USERPROFILE '.tauri\clankban.key'),
+    [string]$Makensis = (Join-Path $env:LOCALAPPDATA 'tauri\NSIS\Bin\makensis.exe')
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$src = Join-Path $root 'src-tauri'
+$app = Join-Path $root 'app'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 if (-not (Test-Path $KeyPath)) { throw "Signing key not found at $KeyPath" }
+if (-not (Test-Path $Makensis)) { throw "makensis not found at $Makensis. Install NSIS or pass -Makensis." }
 
-$conf = Get-Content (Join-Path $src 'tauri.conf.json') -Raw | ConvertFrom-Json
-if ($conf.version -ne $Version) { throw "tauri.conf.json is version $($conf.version), expected $Version" }
-$cargoVersion = (Select-String -Path (Join-Path $src 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-if ($cargoVersion -ne $Version) { throw "Cargo.toml is version $cargoVersion, expected $Version" }
+$cargoVersion = (Select-String -Path (Join-Path $app 'Cargo.toml') -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+if ($cargoVersion -ne $Version) { throw "app\Cargo.toml is version $cargoVersion, expected $Version" }
 
-# Build into its own folder so a running Clankban does not block the build.
-$env:TAURI_SIGNING_PRIVATE_KEY = $KeyPath
-$env:CARGO_TARGET_DIR = Join-Path $src 'target-release'
-Push-Location $src
-try { cargo tauri build } finally { Pop-Location }
+# 1. Release binary.
+Push-Location $app
+try { cargo build --release } finally { Pop-Location }
+$exe = Join-Path $app 'target\release\clankban.exe'
+if (-not (Test-Path $exe)) { throw "Release build not found at $exe" }
 
-$bundle = Join-Path $env:CARGO_TARGET_DIR 'release\bundle\nsis'
-$installer = Get-ChildItem $bundle -Filter "*_${Version}_x64-setup.exe" | Select-Object -First 1
-if (-not $installer) { throw "Installer for $Version not found in $bundle" }
-$sigPath = "$($installer.FullName).sig"
-if (-not (Test-Path $sigPath)) { throw "Signature not found: $sigPath" }
+# 2. Installer.
+$outDir = Join-Path $root "release\v$Version"
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$installerName = "Clankban_${Version}_x64-setup.exe"
+$installerPath = Join-Path $outDir $installerName
+& $Makensis "/DVERSION=$Version" "/DBINARY=$exe" "/DOUTFILE=$installerPath" (Join-Path $app 'installer\clankban.nsi')
+if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
 
-$signature = (Get-Content $sigPath -Raw).Trim()
-$installerName = $installer.Name
+# 3. Signature (minisign, base64 in the .sig file, as the updater expects).
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = $KeyPath
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+cargo tauri signer sign $installerPath
+if ($LASTEXITCODE -ne 0) { throw "signing failed with exit code $LASTEXITCODE" }
+$sigPath = "$installerPath.sig"
+if (-not (Test-Path $sigPath)) { throw "Signature not written: $sigPath" }
+
+# 4. Manifest the in-app updater reads. Written without a byte-order mark.
 $latest = [ordered]@{
     version   = $Version
     notes     = "Clankban $Version"
     pub_date  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     platforms = [ordered]@{
         'windows-x86_64' = [ordered]@{
-            signature = $signature
+            signature = (Get-Content $sigPath -Raw).Trim()
             url       = "https://github.com/$Repo/releases/download/v$Version/$installerName"
         }
     }
 }
-
-$outDir = Join-Path $root "release\v$Version"
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-Copy-Item $installer.FullName $outDir -Force
-Copy-Item $sigPath $outDir -Force
 $latestPath = Join-Path $outDir 'latest.json'
-$latest | ConvertTo-Json -Depth 6 | Set-Content -Path $latestPath -Encoding utf8
+[System.IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 6), $utf8NoBom)
 
-# Portable single-file build, for people who do not want the installer.
+# 5. Portable single-file build.
 $portableName = "Clankban-$Version-portable.exe"
-Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'release\clankban.exe') (Join-Path $outDir $portableName) -Force
+Copy-Item $exe (Join-Path $outDir $portableName) -Force
 
 Write-Host ''
 Write-Host "Release files for $Version are in $outDir"
 Get-ChildItem $outDir | ForEach-Object { Write-Host "  $($_.Name)" }
 Write-Host ''
 Write-Host 'To publish (not run by this script):'
-Write-Host "  gh release create v$Version `"$outDir\$installerName`" `"$outDir\$installerName.sig`" `"$latestPath`" `"$outDir\$portableName`" --repo $Repo --title `"Clankban $Version`" --notes `"Clankban $Version`""
+Write-Host "  gh release create v$Version `"$installerPath`" `"$sigPath`" `"$latestPath`" `"$(Join-Path $outDir $portableName)`" --repo $Repo --title `"Clankban $Version`" --notes `"Clankban $Version`""

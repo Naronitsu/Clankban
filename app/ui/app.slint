@@ -1,0 +1,874 @@
+import { Button, LineEdit, TextEdit, ComboBox, ScrollView, CheckBox } from "std-widgets.slint";
+
+// ---- data passed from Rust -------------------------------------------------
+
+export struct TaskItem {
+    id: string,
+    title: string,
+    description: string,
+    kind: string,
+    kind-label: string,
+    priority: string,
+    status: string,
+    status-label: string,
+    due: string,
+    due-label: string,
+    overdue: bool,
+    subtasks-done: int,
+    subtasks-total: int,
+    updated-label: string,
+    parent-id: string,
+}
+
+export struct SubtaskItem {
+    index: int,
+    title: string,
+    done: bool,
+    child: bool,
+    child-status: string,
+}
+
+export struct ColumnItem {
+    status: string,
+    label: string,
+    count: int,
+    tasks: [TaskItem],
+}
+
+export struct RunItem {
+    id: string,
+    skill-label: string,
+    status: string,
+    status-label: string,
+    created-label: string,
+    result: string,
+    pending: bool,
+}
+
+export struct SkillItem {
+    name: string,
+    label: string,
+    description: string,
+    arg-name: string,
+    arg-hint: string,
+    arg-required: bool,
+    value: string,
+}
+
+export struct PaletteItem {
+    label: string,
+    hint: string,
+}
+
+// ---- palette ----------------------------------------------------------------
+
+component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: #e7e5f5;
+    in property <color> ink: #3b3570;
+    background: tint;
+    border-radius: 9px;
+    height: 18px;
+    width: label.preferred-width + 14px;
+    label := Text {
+        text: root.text;
+        color: root.ink;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component NavButton inherits Rectangle {
+    in property <string> text;
+    in property <string> count;
+    in property <bool> active;
+    callback clicked();
+    height: 38px;
+    border-radius: 8px;
+    background: root.active ? #34365a : transparent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: #f1f2f8;
+            font-size: 14px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.count;
+            color: #9fa2c4;
+            font-size: 12px;
+            vertical-alignment: center;
+            visible: root.count != "";
+        }
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component StatCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub;
+    in property <bool> warn;
+    background: #ffffff;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #e4e6f0;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 4px;
+        Text { text: root.label; color: #6d7085; font-size: 12px; }
+        Text { text: root.value; color: #1d1f2b; font-size: 26px; font-weight: 700; }
+        Text {
+            text: root.sub;
+            color: root.warn ? #c2552d : #8a8ea5;
+            font-size: 11px;
+            overflow: elide;
+        }
+    }
+}
+
+component TaskCard inherits Rectangle {
+    in property <TaskItem> task;
+    callback clicked();
+    background: #ffffff;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #e4e6f0;
+    min-height: 118px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 6px;
+            Pill {
+                text: root.task.kind-label;
+                tint: root.task.kind == "bug" ? #fde4e1 : (root.task.kind == "epic" ? #e4ecfd : #ece9fb);
+                ink: root.task.kind == "bug" ? #a33b26 : (root.task.kind == "epic" ? #2c4f9e : #4a3fa0);
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                border-radius: 5px;
+                background: root.task.priority == "high" ? #e0523c : (root.task.priority == "medium" ? #e8a33a : #9aa0b8);
+            }
+        }
+        Text {
+            text: root.task.title;
+            color: #1d1f2b;
+            font-size: 14px;
+            font-weight: 600;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: 40px;
+        }
+        Text {
+            text: root.task.description;
+            color: #6d7085;
+            font-size: 12px;
+            wrap: word-wrap;
+            overflow: elide;
+            max-height: 32px;
+        }
+        HorizontalLayout {
+            Text { text: root.task.id; color: #8a8ea5; font-size: 11px; font-family: "DM Mono"; horizontal-stretch: 1; }
+            Text {
+                text: root.task.subtasks-total > 0 ? "" + root.task.subtasks-done + "/" + root.task.subtasks-total + " subtasks   " + root.task.due-label : root.task.due-label;
+                color: root.task.overdue ? #c2552d : #8a8ea5;
+                font-size: 11px;
+            }
+        }
+    }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component Overlay inherits Rectangle {
+    in property <bool> open;
+    callback dismissed();
+    background: #1a1c2a80;
+    visible: root.open;
+    TouchArea { clicked => { root.dismissed(); } }
+}
+
+// ---- main window -----------------------------------------------------------
+
+export component AppWindow inherits Window {
+    title: "Clankban";
+    preferred-width: 1440px;
+    preferred-height: 960px;
+    min-width: 980px;
+    min-height: 680px;
+    background: #f4f5fa;
+
+    // view state
+    in-out property <string> view: "board";
+    in-out property <string> search: "";
+    in-out property <string> sort: "Priority";
+    in-out property <bool> filter-open: false;
+    in-out property <string> filter-priority: "";
+    in-out property <string> filter-type: "";
+    in-out property <string> filter-status: "";
+    in-out property <int> filter-count: 0;
+
+    // stats
+    in-out property <string> stat-active: "0";
+    in-out property <string> stat-active-sub: "";
+    in-out property <string> stat-due: "0";
+    in-out property <string> stat-due-sub: "";
+    in-out property <bool> stat-due-warn: false;
+    in-out property <string> stat-done: "0";
+    in-out property <string> stat-done-sub: "";
+    in-out property <string> stat-recent: "0";
+    in-out property <string> stat-recent-sub: "";
+    in-out property <string> nav-board-count: "0";
+    in-out property <string> nav-recent-count: "0";
+    in-out property <string> nav-agent-count: "0";
+
+    // data
+    in-out property <[ColumnItem]> columns;
+    in-out property <[TaskItem]> list-tasks;
+    in-out property <[TaskItem]> recent-tasks;
+    in-out property <[RunItem]> runs;
+    in-out property <[SkillItem]> skills;
+    in-out property <string> run-count-label: "";
+
+    // sync and updates
+    in-out property <string> sync-text: "Starting…";
+    in-out property <string> sync-detail: "";
+    in-out property <bool> sync-ok: true;
+    in-out property <string> version-text: "";
+    in-out property <string> update-text: "";
+    in-out property <bool> update-available: false;
+    in-out property <string> install-label: "";
+    in-out property <string> notice: "";
+
+    // drawer
+    in-out property <bool> drawer-open: false;
+    in-out property <TaskItem> drawer-task;
+    in-out property <[SubtaskItem]> drawer-subtasks;
+    in-out property <string> drawer-updated: "";
+    in-out property <string> drawer-status-label: "";
+
+    // form
+    in-out property <bool> form-open: false;
+    in-out property <string> form-heading: "Create a task";
+    in-out property <string> form-title: "";
+    in-out property <string> form-description: "";
+    in-out property <string> form-type: "task";
+    in-out property <string> form-priority: "medium";
+    in-out property <string> form-status: "backlog";
+    in-out property <string> form-due: "";
+    in-out property <bool> form-is-new: true;
+
+    // overlays
+    in-out property <bool> palette-open: false;
+    in-out property <string> palette-query: "";
+    in-out property <[PaletteItem]> palette-items;
+    in-out property <bool> help-open: false;
+    in-out property <bool> json-open: false;
+    in-out property <string> json-text: "";
+    in-out property <bool> confirm-open: false;
+    in-out property <string> confirm-text: "";
+    in-out property <string> confirm-action: "";
+
+    // callbacks into Rust
+    callback set-view(string);
+    callback search-changed(string);
+    callback sort-changed(string);
+    callback filter-changed(string, string, string);
+    callback filter-cleared();
+    callback refresh();
+    callback new-task(string);
+    callback open-task(string);
+    callback edit-task();
+    callback delete-task();
+    callback toggle-subtask(int, bool);
+    callback save-form();
+    callback palette-query-changed(string);
+    callback palette-run(int);
+    callback show-json();
+    callback copy-json();
+    callback send-run(int);
+    callback skill-edited(int, string);
+    callback cancel-run(string);
+    callback check-updates();
+    callback install-update();
+    callback confirm-accepted(string);
+    callback show-only-status(string);
+
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "k") {
+                root.palette-query = "";
+                root.palette-query-changed("");
+                root.palette-open = true;
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.palette-open = false;
+                root.help-open = false;
+                root.json-open = false;
+                root.confirm-open = false;
+                root.form-open = false;
+                root.drawer-open = false;
+                root.filter-open = false;
+                return accept;
+            }
+            if (root.form-open || root.palette-open || root.confirm-open) {
+                return reject;
+            }
+            if (event.text == "/") {
+                search-input.focus();
+                return accept;
+            }
+            if (event.text == "n" || event.text == "N") {
+                root.new-task("");
+                return accept;
+            }
+            if (event.text == "?") {
+                root.help-open = true;
+                return accept;
+            }
+            if (event.text == Key.F5) {
+                root.refresh();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    HorizontalLayout {
+        // ---- sidebar ----
+        Rectangle {
+            width: 230px;
+            background: #1d1f2b;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 28px; height: 28px; border-radius: 8px; background: #6e56cf;
+                        Text { text: "C"; color: white; font-size: 15px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text { text: "clankban"; color: #f1f2f8; font-size: 16px; font-weight: 600; vertical-alignment: center; }
+                }
+                Text { text: "Atlas workspace · local"; color: #8d91b0; font-size: 12px; }
+                Rectangle { height: 14px; }
+                NavButton { text: "Board"; count: root.nav-board-count; active: root.view == "board"; clicked => { root.set-view("board"); } }
+                NavButton { text: "List"; count: ""; active: root.view == "list"; clicked => { root.set-view("list"); } }
+                NavButton { text: "Recent changes"; count: root.nav-recent-count; active: root.view == "recent"; clicked => { root.set-view("recent"); } }
+                NavButton { text: "Agent runs"; count: root.nav-agent-count; active: root.view == "agent"; clicked => { root.set-view("agent"); } }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { width: 9px; height: 9px; border-radius: 5px; background: root.sync-ok ? #4cc38a : #e0523c; y: 6px; }
+                    VerticalLayout {
+                        Text { text: root.sync-text; color: #f1f2f8; font-size: 12px; font-weight: 600; }
+                        Text { text: root.sync-detail; color: #8d91b0; font-size: 11px; }
+                    }
+                }
+                Rectangle { height: 8px; }
+                Text { text: "Version " + root.version-text; color: #8d91b0; font-size: 11px; }
+                Text { text: root.update-text; color: #c9cbe0; font-size: 11px; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button { text: "Check for updates"; clicked => { root.check-updates(); } }
+                    Button { text: root.install-label; visible: root.update-available; primary: true; clicked => { root.install-update(); } }
+                }
+            }
+        }
+
+        // ---- main area ----
+        VerticalLayout {
+            // top bar
+            Rectangle {
+                height: 52px;
+                background: #f4f5fa;
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    spacing: 8px;
+                    alignment: center;
+                    Text { text: "Atlas workspace  /"; color: #8a8ea5; font-size: 13px; vertical-alignment: center; }
+                    Text {
+                        text: root.view == "board" ? "Product board" : (root.view == "list" ? "List" : (root.view == "recent" ? "Recent changes" : "Agent runs"));
+                        color: #1d1f2b; font-size: 13px; font-weight: 600; vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Refresh"; clicked => { root.refresh(); } }
+                    Button { text: "Command menu  Ctrl+K"; clicked => { root.palette-query = ""; root.palette-query-changed(""); root.palette-open = true; } }
+                    Button { text: "Shortcuts"; clicked => { root.help-open = true; } }
+                }
+            }
+
+            ScrollView {
+                VerticalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-bottom: 16px;
+                    spacing: 14px;
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: "LOCAL PROJECT"; color: #6e56cf; font-size: 11px; font-weight: 700; }
+                            Text { text: "Product board"; color: #1d1f2b; font-size: 28px; font-weight: 700; }
+                            Text { text: "One visual source of truth for your work and your agents."; color: #6d7085; font-size: 13px; }
+                        }
+                        Button { text: "Copy agent JSON"; clicked => { root.show-json(); } }
+                        Button { text: "New task"; primary: true; clicked => { root.new-task(""); } }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        StatCard { horizontal-stretch: 1; label: "Active work"; value: root.stat-active; sub: root.stat-active-sub; }
+                        StatCard { horizontal-stretch: 1; label: "Due in 7 days"; value: root.stat-due; sub: root.stat-due-sub; warn: root.stat-due-warn; }
+                        StatCard { horizontal-stretch: 1; label: "Completed"; value: root.stat-done; sub: root.stat-done-sub; }
+                        StatCard { horizontal-stretch: 1; label: "Changed in 24h"; value: root.stat-recent; sub: root.stat-recent-sub; }
+                    }
+
+                    // toolbar
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Button { text: "Board"; primary: root.view == "board"; clicked => { root.set-view("board"); } }
+                        Button { text: "List"; primary: root.view == "list"; clicked => { root.set-view("list"); } }
+                        Button { text: "Recent"; primary: root.view == "recent"; clicked => { root.set-view("recent"); } }
+                        Button { text: "Agent runs"; primary: root.view == "agent"; clicked => { root.set-view("agent"); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        search-input := LineEdit {
+                            width: 260px;
+                            placeholder-text: "Search tasks…";
+                            text: root.search;
+                            edited(text) => { root.search = text; root.search-changed(text); }
+                        }
+                        Button {
+                            text: root.filter-count > 0 ? "Filter (" + root.filter-count + ")" : "Filter";
+                            clicked => { root.filter-open = !root.filter-open; }
+                        }
+                        ComboBox {
+                            width: 130px;
+                            model: ["Priority", "Newest", "Due date"];
+                            current-value: root.sort;
+                            selected(value) => { root.sort = value; root.sort-changed(value); }
+                        }
+                    }
+
+                    if root.filter-open : Rectangle {
+                        background: #ffffff;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: #e4e6f0;
+                        height: 74px;
+                        HorizontalLayout {
+                            padding: 14px;
+                            spacing: 12px;
+                            alignment: start;
+                            VerticalLayout {
+                                Text { text: "Priority"; color: #6d7085; font-size: 11px; }
+                                ComboBox {
+                                    width: 150px;
+                                    model: ["Any", "high", "medium", "low"];
+                                    current-value: root.filter-priority == "" ? "Any" : root.filter-priority;
+                                    selected(value) => { root.filter-priority = value == "Any" ? "" : value; root.filter-changed(root.filter-priority, root.filter-type, root.filter-status); }
+                                }
+                            }
+                            VerticalLayout {
+                                Text { text: "Type"; color: #6d7085; font-size: 11px; }
+                                ComboBox {
+                                    width: 150px;
+                                    model: ["Any", "epic", "task", "subtask", "bug"];
+                                    current-value: root.filter-type == "" ? "Any" : root.filter-type;
+                                    selected(value) => { root.filter-type = value == "Any" ? "" : value; root.filter-changed(root.filter-priority, root.filter-type, root.filter-status); }
+                                }
+                            }
+                            VerticalLayout {
+                                Text { text: "Status"; color: #6d7085; font-size: 11px; }
+                                ComboBox {
+                                    width: 150px;
+                                    model: ["Any", "backlog", "progress", "review", "done"];
+                                    current-value: root.filter-status == "" ? "Any" : root.filter-status;
+                                    selected(value) => { root.filter-status = value == "Any" ? "" : value; root.filter-changed(root.filter-priority, root.filter-type, root.filter-status); }
+                                }
+                            }
+                            Button { text: "Clear"; clicked => { root.filter-cleared(); } }
+                        }
+                    }
+
+                    // board view
+                    if root.view == "board" : HorizontalLayout {
+                        spacing: 12px;
+                        for column[ci] in root.columns : VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 8px;
+                            alignment: start;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Text { text: column.label; color: #1d1f2b; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                                Pill { text: column.count; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button { text: "Only"; clicked => { root.show-only-status(column.status); } }
+                            }
+                            for task[ti] in column.tasks : TaskCard {
+                                task: task;
+                                clicked => { root.open-task(task.id); }
+                            }
+                            Button { text: "+ Add to " + column.label; clicked => { root.new-task(column.status); } }
+                        }
+                    }
+
+                    // list view
+                    if root.view == "list" : Rectangle {
+                        background: #ffffff;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: #e4e6f0;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 2px;
+                            HorizontalLayout {
+                                padding: 8px;
+                                Text { text: "ID"; width: 90px; color: #6d7085; font-size: 11px; font-weight: 600; }
+                                Text { text: "Title"; horizontal-stretch: 1; color: #6d7085; font-size: 11px; font-weight: 600; }
+                                Text { text: "Type"; width: 110px; color: #6d7085; font-size: 11px; font-weight: 600; }
+                                Text { text: "Priority"; width: 90px; color: #6d7085; font-size: 11px; font-weight: 600; }
+                                Text { text: "Status"; width: 110px; color: #6d7085; font-size: 11px; font-weight: 600; }
+                                Text { text: "Due"; width: 110px; color: #6d7085; font-size: 11px; font-weight: 600; }
+                            }
+                            for task[i] in root.list-tasks : Rectangle {
+                                height: 36px;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    Text { text: task.id; width: 90px; color: #6d7085; font-size: 12px; font-family: "DM Mono"; }
+                                    Text { text: task.title; horizontal-stretch: 1; color: #1d1f2b; font-size: 13px; overflow: elide; }
+                                    Text { text: task.kind-label; width: 110px; color: #6d7085; font-size: 12px; }
+                                    Text { text: task.priority; width: 90px; color: #6d7085; font-size: 12px; }
+                                    Text { text: task.status-label; width: 110px; color: #6d7085; font-size: 12px; }
+                                    Text { text: task.due-label; width: 110px; color: task.overdue ? #c2552d : #6d7085; font-size: 12px; }
+                                }
+                                TouchArea { clicked => { root.open-task(task.id); } }
+                            }
+                            if root.list-tasks.length == 0 : Text { text: "No tasks match these filters."; color: #8a8ea5; font-size: 13px; }
+                        }
+                    }
+
+                    // recent view
+                    if root.view == "recent" : Rectangle {
+                        background: #ffffff;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: #e4e6f0;
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 2px;
+                            for task[i] in root.recent-tasks : Rectangle {
+                                height: 40px;
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 10px;
+                                    Text { text: task.id; width: 90px; color: #6d7085; font-size: 12px; font-family: "DM Mono"; }
+                                    Text { text: task.title; horizontal-stretch: 1; color: #1d1f2b; font-size: 13px; overflow: elide; }
+                                    Text { text: task.status-label; width: 110px; color: #6d7085; font-size: 12px; }
+                                    Text { text: task.updated-label; width: 130px; color: #8a8ea5; font-size: 12px; }
+                                }
+                                TouchArea { clicked => { root.open-task(task.id); } }
+                            }
+                            if root.recent-tasks.length == 0 : Text { text: "No changes recorded yet. Edits made from the board or an agent appear here."; color: #8a8ea5; font-size: 13px; }
+                        }
+                    }
+
+                    // agent runs view
+                    if root.view == "agent" : VerticalLayout {
+                        spacing: 14px;
+                        Text {
+                            text: "Send a skill to the connected agent. It reads the request through the MCP bridge, shows its plan, and waits for your approval before changing anything.";
+                            color: #6d7085; font-size: 13px; wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            for skill[si] in root.skills : Rectangle {
+                                horizontal-stretch: 1;
+                                vertical-stretch: 0;
+                                background: #ffffff;
+                                border-radius: 12px;
+                                border-width: 1px;
+                                border-color: #e4e6f0;
+                                VerticalLayout {
+                                    padding: 14px;
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text { text: skill.label; color: #1d1f2b; font-size: 15px; font-weight: 600; vertical-stretch: 0; }
+                                    Text { text: skill.description; color: #6d7085; font-size: 12px; wrap: word-wrap; vertical-stretch: 0; }
+                                    Text { text: skill.arg-name + (skill.arg-required ? " (required)" : " (optional)"); color: #6d7085; font-size: 11px; vertical-stretch: 0; }
+                                    TextEdit {
+                                        height: 90px;
+                                        vertical-stretch: 0;
+                                        placeholder-text: skill.arg-hint;
+                                        text: skill.value;
+                                        edited(text) => { root.skill-edited(si, text); }
+                                    }
+                                    Button { text: "Send to agent"; primary: true; vertical-stretch: 0; clicked => { root.send-run(si); } }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            Text { text: "Requests"; color: #1d1f2b; font-size: 15px; font-weight: 600; horizontal-stretch: 1; }
+                            Text { text: root.run-count-label; color: #8a8ea5; font-size: 12px; }
+                        }
+                        for run[ri] in root.runs : Rectangle {
+                            background: #ffffff;
+                            border-radius: 10px;
+                            border-width: 1px;
+                            border-color: #e4e6f0;
+                            min-height: 56px;
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 4px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "#" + run.id + "  " + run.skill-label; color: #1d1f2b; font-size: 13px; font-weight: 600; }
+                                    Pill { text: run.status-label; }
+                                    Text { text: run.created-label; color: #8a8ea5; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                                    if run.pending : Button { text: "Cancel"; clicked => { root.cancel-run(run.id); } }
+                                }
+                                if run.result != "" : Text { text: run.result; color: #4a4d62; font-size: 12px; wrap: word-wrap; }
+                            }
+                        }
+                        if root.runs.length == 0 : Text { text: "No requests yet. Send a skill above."; color: #8a8ea5; font-size: 13px; }
+                    }
+                }
+            }
+
+            // footer
+            Rectangle {
+                height: 30px;
+                background: #f4f5fa;
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    Text { text: root.notice; color: #c2552d; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    Text { text: "Ctrl+K command menu · ? shortcuts · Data stored locally"; color: #8a8ea5; font-size: 11px; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+
+    // ---- drawer ----
+    if root.drawer-open : Rectangle {
+        x: root.width - self.width;
+        y: 0px;
+        width: 400px;
+        height: root.height;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #e4e6f0;
+        VerticalLayout {
+            padding: 20px;
+            spacing: 10px;
+            HorizontalLayout {
+                Pill { text: root.drawer-task.kind-label; }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Close"; clicked => { root.drawer-open = false; } }
+            }
+            Text { text: root.drawer-task.id; color: #8a8ea5; font-size: 12px; font-family: "DM Mono"; }
+            Text { text: root.drawer-task.title; color: #1d1f2b; font-size: 20px; font-weight: 700; wrap: word-wrap; }
+            Text { text: root.drawer-task.description != "" ? root.drawer-task.description : "No description yet."; color: #4a4d62; font-size: 13px; wrap: word-wrap; }
+            HorizontalLayout {
+                spacing: 6px;
+                Pill { text: root.drawer-task.priority + " priority"; }
+                Pill { text: root.drawer-status-label; }
+                Pill { text: "Due " + root.drawer-task.due-label; }
+            }
+            Text { text: "Subtasks  " + root.drawer-task.subtasks-done + " / " + root.drawer-task.subtasks-total; color: #1d1f2b; font-size: 13px; font-weight: 600; }
+            for sub[i] in root.drawer-subtasks : HorizontalLayout {
+                spacing: 8px;
+                if !sub.child : CheckBox {
+                    text: sub.title;
+                    checked: sub.done;
+                    toggled => { root.toggle-subtask(sub.index, self.checked); }
+                }
+                if sub.child : Text { text: "· " + sub.title + "  (" + sub.child-status + ")"; color: #4a4d62; font-size: 13px; }
+            }
+            Text { text: "Last change: " + root.drawer-updated; color: #8a8ea5; font-size: 12px; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Delete"; clicked => { root.confirm-text = "Delete this work item?"; root.confirm-action = "delete"; root.confirm-open = true; } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Edit task"; primary: true; clicked => { root.edit-task(); } }
+            }
+        }
+    }
+
+    // ---- create / edit form ----
+    Overlay { open: root.form-open; dismissed => { root.form-open = false; } }
+    if root.form-open : Rectangle {
+        width: 580px;
+        height: 560px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 14px;
+        VerticalLayout {
+            padding: 22px;
+            spacing: 10px;
+            Text { text: root.form-heading; color: #1d1f2b; font-size: 18px; font-weight: 700; }
+            Text { text: "Title"; color: #6d7085; font-size: 12px; }
+            LineEdit { placeholder-text: "What needs to happen?"; text <=> root.form-title; }
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: "Type"; color: #6d7085; font-size: 12px; }
+                    ComboBox { model: ["task", "epic", "bug", "subtask"]; current-value: root.form-type; selected(value) => { root.form-type = value; } }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: "Priority"; color: #6d7085; font-size: 12px; }
+                    ComboBox { model: ["high", "medium", "low"]; current-value: root.form-priority; selected(value) => { root.form-priority = value; } }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: "Status"; color: #6d7085; font-size: 12px; }
+                    ComboBox { model: ["backlog", "progress", "review", "done"]; current-value: root.form-status; selected(value) => { root.form-status = value; } }
+                }
+            }
+            Text { text: "Due date (YYYY-MM-DD, optional)"; color: #6d7085; font-size: 12px; }
+            LineEdit { placeholder-text: "2026-12-01"; text <=> root.form-due; }
+            Text { text: "Description"; color: #6d7085; font-size: 12px; }
+            TextEdit { height: 130px; placeholder-text: "Add context for teammates and agents…"; text <=> root.form-description; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Cancel"; clicked => { root.form-open = false; } }
+                Button { text: "Save work item"; primary: true; clicked => { root.save-form(); } }
+            }
+        }
+    }
+
+    // ---- command palette ----
+    if root.palette-open : Rectangle {
+        width: 560px;
+        height: min(root.height * 0.6, 440px);
+        x: (root.width - self.width) / 2;
+        y: 90px;
+        background: #ffffff;
+        border-radius: 14px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000040;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+            palette-input := LineEdit {
+                placeholder-text: "Type a command…";
+                text: root.palette-query;
+                edited(text) => { root.palette-query = text; root.palette-query-changed(text); }
+                accepted => { root.palette-run(0); }
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+            for item[pi] in root.palette-items : Rectangle {
+                height: 36px;
+                border-radius: 8px;
+                background: pa.has-hover ? #efeefb : transparent;
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    Text { text: item.label; color: #1d1f2b; font-size: 14px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Text { text: item.hint; color: #8a8ea5; font-size: 12px; vertical-alignment: center; }
+                }
+                pa := TouchArea { clicked => { root.palette-run(pi); } }
+            }
+                }
+            }
+        }
+    }
+
+    // ---- shortcuts ----
+    if root.help-open : Rectangle {
+        width: 460px;
+        height: 320px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 14px;
+        VerticalLayout {
+            padding: 22px;
+            spacing: 10px;
+            Text { text: "Shortcuts"; color: #1d1f2b; font-size: 18px; font-weight: 700; }
+            Text { text: "Ctrl+K — command menu"; color: #4a4d62; font-size: 13px; }
+            Text { text: "/ — search tasks"; color: #4a4d62; font-size: 13px; }
+            Text { text: "N — new task"; color: #4a4d62; font-size: 13px; }
+            Text { text: "F5 — refresh"; color: #4a4d62; font-size: 13px; }
+            Text { text: "Esc — close the open panel"; color: #4a4d62; font-size: 13px; }
+            Text { text: "? — this list"; color: #4a4d62; font-size: 13px; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout { Rectangle { horizontal-stretch: 1; } Button { text: "Close"; clicked => { root.help-open = false; } } }
+        }
+    }
+
+    // ---- agent JSON ----
+    if root.json-open : Rectangle {
+        width: 640px;
+        height: 520px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 14px;
+        VerticalLayout {
+            padding: 22px;
+            spacing: 10px;
+            Text { text: "Board state as JSON"; color: #1d1f2b; font-size: 18px; font-weight: 700; }
+            Text { text: "The same representation agents read through the MCP bridge."; color: #6d7085; font-size: 12px; }
+            ScrollView {
+                vertical-stretch: 1;
+                Text { text: root.json-text; color: #1d1f2b; font-size: 11px; font-family: "DM Mono"; wrap: word-wrap; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Copy JSON"; primary: true; clicked => { root.copy-json(); } }
+                Button { text: "Close"; clicked => { root.json-open = false; } }
+            }
+        }
+    }
+
+    // ---- confirm ----
+    if root.confirm-open : Rectangle {
+        width: 380px;
+        height: 170px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: #ffffff;
+        border-radius: 14px;
+        VerticalLayout {
+            padding: 22px;
+            spacing: 14px;
+            Text { text: root.confirm-text; color: #1d1f2b; font-size: 15px; wrap: word-wrap; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Cancel"; clicked => { root.confirm-open = false; } }
+                Button {
+                    text: "Yes";
+                    primary: true;
+                    clicked => { root.confirm-open = false; root.confirm-accepted(root.confirm-action); }
+                }
+            }
+        }
+    }
+}

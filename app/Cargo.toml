@@ -1,14 +1,15 @@
 [package]
 name = "clankban"
-version = "0.1.1"
+version = "0.2.0"
 description = "A local-first visual workspace for humans and coding agents."
 edition = "2021"
+build = "build.rs"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+slint-build = "1.19"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+slint = "1.19"
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -19,5 +20,6 @@ regex = "1"
 dirs = "5"
 ureq = { version = "2", features = ["json"] }
 percent-encoding = "2"
-tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
+minisign-verify = "0.3"
+base64 = "0.22"
+arboard = "3"

@@ -16,40 +16,39 @@ Clankban is a self-contained Windows desktop application that gives humans a vis
 
 ```text
 ┌──────────────────────────────┐
-│ Electron desktop window       │
-│ Board UI: HTML/CSS/JS         │
+│ Clankban window (Slint, Rust) │
+│ Board, drawer, agent runs     │
 └──────────────┬───────────────┘
-               │ HTTP 127.0.0.1:4187
+               │ same Store, in-process
 ┌──────────────▼───────────────┐
-│ Node local service            │
-│ REST API + SQLite             │
-│ app userData/clankban.sqlite  │
+│ Rust core                     │
+│ SQLite store + run queue      │
+│ REST API on 127.0.0.1:4187    │
+│ %APPDATA%clankbanclankban.sqlite │
 └──────────────┬───────────────┘
                │
 ┌──────────────▼───────────────┐
-│ MCP stdio bridge              │
-│ get_agent_context             │
-│ get_task / create_task        │
-│ update_task                   │
+│ MCP stdio bridge (--mcp)      │
+│ tools + import/update/review  │
+│ prompts + run-request tools   │
 └──────────────┬───────────────┘
                │
      Claude Code, Codex, other
      local MCP-capable agents
 ```
 
-The desktop app starts the API on `127.0.0.1:4187`. The MCP bridge is launched by an agent as a stdio process and forwards requests to that API when `CLANKBAN_API_URL` is set. This keeps agent access separate from the UI while preserving one live source of truth.
+The window and the agent API share one `Store`, so a change made on the board is visible to agents immediately and the other way round. The window also re-reads the store every two seconds to pick up agent changes. The MCP bridge is launched by an agent as a stdio process. It forwards requests to the API when `CLANKBAN_API_URL` is set, or starts its own API over the same data folder when it is not.
 
-## Packaging
+## Packaging and updates
 
-- Desktop runtime: Rust with Tauri 2 (`src-tauri/`). The board UI in `ui/` runs in the Tauri WebView and talks to the local API.
-- Single binary, three modes: the desktop window (default), `--api` (headless API), and `--mcp` (stdio MCP bridge).
-- The Rust port keeps the same SQLite schema, routes, JSON payloads, and MCP tools as the original Node/Electron version.
-- Installer: Tauri NSIS bundle (`cargo tauri build`).
+- Desktop UI: native Rust with [Slint](https://slint.dev). The layout is in `app/ui/app.slint`, and the logic is in `app/src/gui.rs`. There is no web view.
+- One binary, four modes: the window (default), `--api` (headless API), `--mcp` (stdio MCP bridge), and `--verify-update <installer> <sig>`.
+- Installer: NSIS script at `app/installer/clankban.nsi`, built with `makensis`. It installs per user to `%LOCALAPPDATA%Clankban`. Silent switches: `/S` (quiet), `/R` (start the app afterwards).
+- Release: `scripts/release.ps1 -Version X.Y.Z` builds the release exe, creates and signs the installer, writes `latest.json`, and prints the `gh release create` command. It does not publish.
+- In-app updates: the app reads `latest.json` from the newest GitHub release, downloads the installer, checks its minisign signature against the public key built into the app, and only then runs it silently. A tampered installer is refused.
 - Platform target: Windows x64 for the first release.
-- Data location: `%APPDATA%\clankban\clankban.sqlite` (same folder the Electron build used, so existing data opens unchanged). Override with `CLANKBAN_DATA_DIR`.
-- The installer is currently unsigned; SmartScreen may warn on first launch.
-- The original Electron/Node runtime has been removed. Its behaviour is preserved in the Rust port.
-- Browser-only fallback remains available by opening `ui/index.html`, but it uses localStorage and is not the canonical desktop runtime.
+- Data location: `%APPDATA%clankbanclankban.sqlite`. The same folder the earlier builds used, so existing data opens unchanged. Override with `CLANKBAN_DATA_DIR`. Uninstalling keeps this folder.
+- Installers and the portable exe are unsigned for Windows, so SmartScreen may warn on first launch.
 
 ## Data model
 
@@ -102,13 +101,13 @@ The local stdio server exposes:
 - `create_task(title, description?, type?, priority?, status?, due?, parentId?, subtasks?)`.
 - `update_task(id, title?, description?, priority?, status?, due?, parentId?)`.
 
-The bridge also serves MCP prompts, which are agent workflows compiled into `clankban.exe` from `src-tauri/skills/`. They are listed with `prompts/list` and rendered with `prompts/get`. They are not local Claude skills, so any MCP client connected to the bridge gets them:
+The bridge also serves MCP prompts, which are agent workflows compiled into `clankban.exe` from `app/skills/`. They are listed with `prompts/list` and rendered with `prompts/get`. They are not local Claude skills, so any MCP client connected to the bridge gets them:
 
 - `import_tasks(source)` — reads the board, builds an inventory, and creates items only after approval, with `parentId` set explicitly.
 - `update_tasks(changes)` — reads each item with `get_task`, shows planned field changes, and applies them after approval.
 - `review_tasks(scope?)` — read-only health check: overdue, stuck, missing context, orphans, priority mismatches, and duplicates.
 
-Skills are defined once in `src-tauri/src/skills.rs`. The MCP bridge serves them as prompts, and the board's **Agent runs** view sends them to an agent.
+Skills are defined once in `app/src/skills.rs`. The MCP bridge serves them as prompts, and the board's **Agent runs** view sends them to an agent.
 
 **Run queue.** Sending a skill from the board stores a request in the `run_requests` table with status `pending`. The bridge exposes two tools for working the queue:
 
