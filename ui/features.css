@@ -57,3 +57,35 @@
 
 /* Sidebar items are buttons now; reset browser button chrome so they match the old links. */
 button.nav-item { background: none; border: 0; font: inherit; color: inherit; width: 100%; text-align: left; cursor: pointer; }
+
+/* Agent runs view: skill forms and the request queue. */
+.agent-view { margin-top: 8px; }
+.agent-view[hidden] { display: none; }
+.agent-intro p { margin: 0 0 14px; font-size: 14px; opacity: 0.8; }
+.skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+.skill-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; background: #fff; border: 1px solid rgba(20, 20, 40, 0.1); border-radius: 12px; }
+.skill-card h3 { margin: 0; text-transform: capitalize; font-size: 16px; }
+.skill-card p { margin: 0; font-size: 13px; opacity: 0.8; }
+.skill-card label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.skill-card textarea { font: inherit; font-size: 13px; padding: 8px; border-radius: 8px; border: 1px solid rgba(20, 20, 40, 0.15); resize: vertical; }
+.skill-actions { margin-top: auto; }
+.run-heading { margin-top: 22px; }
+.run-row { padding: 12px 16px; background: #fff; border-radius: 12px; border: 1px solid rgba(20, 20, 40, 0.08); margin-bottom: 8px; }
+.run-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run-main small { opacity: 0.6; }
+.run-status { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(20, 20, 40, 0.08); text-transform: uppercase; letter-spacing: 0.04em; }
+.run-status.pending { background: rgba(230, 150, 40, 0.18); }
+.run-status.running { background: rgba(110, 86, 207, 0.18); }
+.run-status.done { background: rgba(40, 170, 90, 0.18); }
+.run-status.failed { background: rgba(214, 69, 69, 0.18); }
+.run-result { margin: 8px 0 0; font-size: 13px; white-space: pre-wrap; opacity: 0.85; }
+.run-row .cancel-run { margin-top: 8px; }
+
+/* The base stylesheet gives .board a display value, which would override the hidden attribute. */
+.board[hidden] { display: none; }
+
+/* Update controls in the sidebar footer. */
+.update-panel { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px 2px; }
+.update-panel small { opacity: 0.7; font-size: 12px; }
+.update-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.update-actions .button { font-size: 12px; padding: 6px 10px; }

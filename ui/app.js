@@ -34,6 +34,9 @@ let activeTaskId = null;
 let editingId = null;
 let lastSync = null;
 let syncOk = !remoteMode;
+let skills = [];
+let runRequests = [];
+let agentFormsBuilt = false;
 
 const $ = selector => document.querySelector(selector);
 const enc = encodeURIComponent;
@@ -52,6 +55,7 @@ async function loadRemoteTasks() {
   try {
     const result = await apiRequest('/api/tasks');
     tasks = result.tasks;
+    await Promise.all([loadRunRequests(), loadSkills()]);
     syncOk = true;
     lastSync = new Date();
     persist();
@@ -151,6 +155,7 @@ function renderStats() {
   $('#recentSub').textContent = recent ? 'Last 24 hours' : 'No changes today';
   $('#navBoardCount').textContent = tasks.length;
   $('#navRecentCount').textContent = recent;
+  $('#navAgentCount').textContent = runRequests.filter(r => r.status === 'pending').length;
 }
 
 function card(t) {
@@ -207,10 +212,12 @@ function render() {
   $('#boardGrid').hidden = view !== 'board';
   $('#listView').hidden = view !== 'list';
   $('#recentView').hidden = view !== 'recent';
-  $('#viewTitle').textContent = { board: 'Product board', list: 'List', recent: 'Recent changes' }[view];
+  $('#agentView').hidden = view !== 'agent';
+  $('#viewTitle').textContent = { board: 'Product board', list: 'List', recent: 'Recent changes', agent: 'Agent runs' }[view];
   if (view === 'board') renderBoard(list);
   if (view === 'list') renderList(list);
   if (view === 'recent') renderRecent(list);
+  if (view === 'agent') renderAgent();
 
   const count = activeFilterCount();
   $('#filterBadge').hidden = count === 0;
@@ -433,6 +440,162 @@ async function refreshNow() {
   button.disabled = false;
 }
 
+// ---- agent runs ------------------------------------------------------------
+
+async function loadRunRequests() {
+  const result = await apiRequest('/api/run-requests');
+  runRequests = result.runs;
+}
+
+async function loadSkills() {
+  if (skills.length) return;
+  const result = await apiRequest('/api/skills');
+  skills = result.skills;
+}
+
+function runStatusLabel(status) {
+  return { pending: 'Pending', running: 'Running', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' }[status] || status;
+}
+
+// Forms are built once so text typed into them survives the five-second refresh.
+function renderAgentForms() {
+  if (agentFormsBuilt || !skills.length) return;
+  $('#agentView').innerHTML = `
+    <div class="agent-intro"><p>Send a skill to the connected agent. It reads the request through the MCP bridge, shows its plan, and waits for your approval before changing anything.</p></div>
+    <div class="skill-grid">${skills.map(skill => `
+      <form class="skill-card" data-skill="${escapeHtml(skill.name)}">
+        <h3>${escapeHtml(skill.name.replace(/_/g, ' '))}</h3>
+        <p>${escapeHtml(skill.description)}</p>
+        ${skill.arguments.map(arg => `
+          <label>${escapeHtml(arg.name)}${arg.required ? ' (required)' : ''}
+            <textarea name="${escapeHtml(arg.name)}" rows="3" placeholder="${escapeHtml(arg.description)}"></textarea>
+          </label>`).join('')}
+        <div class="skill-actions"><button class="button primary" type="submit">Send to agent</button></div>
+      </form>`).join('')}
+    </div>
+    <div class="section-heading run-heading"><span>Requests</span><span id="runCount"></span></div>
+    <div id="runList"></div>`;
+  agentFormsBuilt = true;
+}
+
+function renderRunList() {
+  const list = $('#runList');
+  if (!list) return;
+  const active = runRequests.filter(r => r.status === 'pending' || r.status === 'running').length;
+  $('#runCount').textContent = `${active} active`;
+  const newestFirst = [...runRequests].reverse();
+  list.innerHTML = newestFirst.length
+    ? newestFirst.map(run => `
+      <div class="run-row">
+        <div class="run-main">
+          <strong>#${run.id} ${escapeHtml(run.skill.replace(/_/g, ' '))}</strong>
+          <span class="run-status ${run.status}">${runStatusLabel(run.status)}</span>
+          <small>${relativeTime(run.created)}</small>
+        </div>
+        ${run.result ? `<p class="run-result">${escapeHtml(run.result)}</p>` : ''}
+        ${run.status === 'pending' ? `<button class="button quiet cancel-run" data-id="${run.id}">Cancel</button>` : ''}
+      </div>`).join('')
+    : '<div class="empty-note">No requests yet. Send a skill above.</div>';
+}
+
+function renderAgent() {
+  if (!remoteMode) {
+    $('#agentView').innerHTML = '<div class="empty-note">Agent runs need the desktop app and its local API. Open the installed Clankban to send skills to an agent.</div>';
+    agentFormsBuilt = false;
+    return;
+  }
+  renderAgentForms();
+  renderRunList();
+}
+
+async function sendRun(form) {
+  const skill = skills.find(s => s.name === form.dataset.skill);
+  if (!skill) return;
+  const args = {};
+  for (const arg of skill.arguments) {
+    const value = form.elements[arg.name]?.value.trim();
+    if (value) args[arg.name] = value;
+  }
+  const missing = skill.arguments.find(a => a.required && !args[a.name]);
+  if (missing) {
+    alert(`${missing.name} is required.`);
+    return;
+  }
+  try {
+    await apiRequest('/api/run-requests', { method: 'POST', body: JSON.stringify({ skill: skill.name, arguments: args }) });
+    form.reset();
+    await loadRunRequests();
+    render();
+  } catch (error) {
+    alert(`Could not send: ${error.message}`);
+  }
+}
+
+async function cancelRun(id) {
+  if (!confirm('Cancel this request? The agent will not run it.')) return;
+  try {
+    await apiRequest(`/api/run-requests/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'cancelled', result: 'Cancelled from the board' }) });
+    await loadRunRequests();
+    render();
+  } catch (error) {
+    alert(`Could not cancel: ${error.message}`);
+  }
+}
+
+// ---- updates ---------------------------------------------------------------
+// Uses the Tauri updater and process plugins. In a plain browser these are absent and the controls explain why.
+
+const tauriApi = window.__TAURI__;
+let pendingUpdate = null;
+
+function setUpdateStatus(text) { $('#updateStatus').textContent = text; }
+
+async function checkForUpdates({ silent = false } = {}) {
+  if (!tauriApi?.updater) {
+    if (!silent) setUpdateStatus('Updates work in the installed app.');
+    return;
+  }
+  if (!silent) setUpdateStatus('Checking…');
+  try {
+    const update = await tauriApi.updater.check();
+    pendingUpdate = update;
+    if (update) {
+      setUpdateStatus(`Version ${update.version} is available.`);
+      $('#installUpdate').textContent = `Install ${update.version} and restart`;
+      $('#installUpdate').disabled = false;
+      $('#installUpdate').hidden = false;
+    } else if (!silent) {
+      setUpdateStatus('You have the latest version.');
+    }
+  } catch (error) {
+    if (!silent) setUpdateStatus(`Could not check: ${error}`);
+  }
+}
+
+async function installUpdate() {
+  if (!pendingUpdate) return;
+  if (!confirm(`Install version ${pendingUpdate.version} now? Clankban will restart.`)) return;
+  $('#installUpdate').disabled = true;
+  setUpdateStatus('Downloading…');
+  try {
+    await pendingUpdate.downloadAndInstall();
+    setUpdateStatus('Restarting…');
+    await tauriApi.process.relaunch();
+  } catch (error) {
+    $('#installUpdate').disabled = false;
+    setUpdateStatus(`Update failed: ${error}`);
+  }
+}
+
+async function showAppVersion() {
+  try {
+    const version = await tauriApi?.app?.getVersion?.();
+    $('#appVersion').textContent = version || 'browser build';
+  } catch {
+    $('#appVersion').textContent = 'unknown';
+  }
+}
+
 // ---- wiring ----------------------------------------------------------------
 
 function isOpen(selector) { return document.querySelector(selector).classList.contains('open'); }
@@ -496,7 +659,16 @@ $('#helpBackdrop').onclick = e => { if (e.target.id === 'helpBackdrop') closeHel
 
 $('#refreshBoard').onclick = refreshNow;
 
+document.addEventListener('submit', e => {
+  if (e.target.matches('.skill-card')) {
+    e.preventDefault();
+    sendRun(e.target);
+  }
+});
+
 document.addEventListener('click', e => {
+  const cancelButton = e.target.closest('.cancel-run');
+  if (cancelButton) return cancelRun(Number(cancelButton.dataset.id));
   const menuButton = e.target.closest('.column-menu');
   if (menuButton) return openColumnMenu(menuButton);
   const addButton = e.target.closest('.column-add');
@@ -520,6 +692,11 @@ document.addEventListener('keydown', e => {
   else if (e.key === '?') openHelp();
 });
 
+$('#checkUpdates').onclick = () => checkForUpdates();
+$('#installUpdate').onclick = installUpdate;
+
 render();
 loadRemoteTasks();
 if (remoteMode) setInterval(loadRemoteTasks, 5000);
+showAppVersion();
+if (tauriApi?.updater) setTimeout(() => checkForUpdates({ silent: true }), 4000);

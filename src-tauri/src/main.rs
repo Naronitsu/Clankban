@@ -3,6 +3,7 @@
 
 mod api;
 mod mcp;
+mod skills;
 mod store;
 
 use std::net::TcpListener;
@@ -47,6 +48,8 @@ fn main() {
     }
 
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
 

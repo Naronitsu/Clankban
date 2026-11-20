@@ -1,4 +1,5 @@
-//! Local HTTP API, identical in routes and payloads to the original Node server.
+//! Local HTTP API, identical in routes and payloads to the original Node server,
+//! plus skill discovery and the agent run-request queue.
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::skills;
 use crate::store::{ApiError, Store};
 
 pub type SharedStore = Arc<Store>;
@@ -29,15 +31,21 @@ async fn handle(State(store): State<SharedStore>, method: Method, uri: Uri, body
     if method == Method::OPTIONS {
         return preflight();
     }
-    let path = uri.path().to_string();
-    match tokio::task::spawn_blocking(move || route(&store, &method, &path, &body)).await {
+    let target = uri
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string());
+    match tokio::task::spawn_blocking(move || route(&store, &method, &target, &body)).await {
         Ok((status, value)) => respond(status, &value),
         Err(_) => respond(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "Internal error" })),
     }
 }
 
-fn route(store: &Store, method: &Method, path: &str, body: &[u8]) -> (StatusCode, Value) {
-    match (method.as_str(), path) {
+fn route(store: &Store, method: &Method, target: &str, body: &[u8]) -> (StatusCode, Value) {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let method = method.as_str();
+
+    match (method, path) {
         ("GET", "/api/health") => {
             return (StatusCode::OK, json!({ "ok": true, "app": "clankban", "version": "0.1.0" }));
         }
@@ -53,13 +61,39 @@ fn route(store: &Store, method: &Method, path: &str, body: &[u8]) -> (StatusCode
                 Err(response) => response,
             };
         }
+        ("GET", "/api/skills") => {
+            return (StatusCode::OK, json!({ "skills": skills::describe_all() }));
+        }
+        ("GET", "/api/run-requests") => {
+            let status = query_param(query, "status");
+            return reply(
+                store.list_runs(status.as_deref()).map(|runs| json!({ "runs": runs })),
+                StatusCode::OK,
+            );
+        }
+        ("POST", "/api/run-requests") => {
+            return match parse_body(body) {
+                Ok(input) => create_run(store, &input),
+                Err(response) => response,
+            };
+        }
         _ => {}
+    }
+
+    if let Some(raw_id) = path.strip_prefix("/api/run-requests/") {
+        return match (method, raw_id.parse::<i64>()) {
+            ("PATCH", Ok(id)) => match parse_body(body) {
+                Ok(input) => update_run(store, id, &input),
+                Err(response) => response,
+            },
+            _ => (StatusCode::NOT_FOUND, json!({ "error": "Route not found" })),
+        };
     }
 
     if let Some(raw_id) = path.strip_prefix("/api/tasks/") {
         if !raw_id.is_empty() && !raw_id.contains('/') {
             let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
-            return match method.as_str() {
+            return match method {
                 "GET" => match store.get(&id) {
                     Ok(Some(task)) => reply(Ok(task), StatusCode::OK),
                     Ok(None) => error(ApiError::NotFound),
@@ -79,6 +113,36 @@ fn route(store: &Store, method: &Method, path: &str, body: &[u8]) -> (StatusCode
     }
 
     (StatusCode::NOT_FOUND, json!({ "error": "Route not found" }))
+}
+
+fn create_run(store: &Store, input: &Map<String, Value>) -> (StatusCode, Value) {
+    let requested = input.get("skill").and_then(Value::as_str).unwrap_or("");
+    let Some(skill) = skills::find(requested) else {
+        return error(ApiError::BadRequest(format!("Unknown skill: {requested}")));
+    };
+    let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    if !arguments.is_object() {
+        return error(ApiError::BadRequest("arguments must be an object".into()));
+    }
+    if let Some(missing) = skills::missing_required(skill, &arguments) {
+        return error(ApiError::BadRequest(format!("Missing required argument: {missing}")));
+    }
+    reply(store.create_run(skill.name, &arguments), StatusCode::CREATED)
+}
+
+fn update_run(store: &Store, id: i64, input: &Map<String, Value>) -> (StatusCode, Value) {
+    let Some(status) = input.get("status").and_then(Value::as_str) else {
+        return error(ApiError::BadRequest("status is required".into()));
+    };
+    let result = input.get("result").and_then(Value::as_str);
+    reply(store.update_run(id, status, result), StatusCode::OK)
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| percent_decode_str(v).decode_utf8_lossy().into_owned())
+    })
 }
 
 fn reply<T: Serialize>(result: Result<T, ApiError>, ok_status: StatusCode) -> (StatusCode, Value) {

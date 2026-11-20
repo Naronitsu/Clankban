@@ -1,13 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Clankban",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.clankban.desktop",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
     "windows": [],
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     }
@@ -15,6 +16,13 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico", "icons/icon.png"]
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBFQzU3NUU1MjMxNTA4RUQKUldUdENCVWo1WFhGRHNuQS9IZm1jWnJiQ3A0amdUb21SKzF6SWM3bUVtRDZiVkUwL2FrSWxLTXMK",
+      "endpoints": ["https://github.com/Naronitsu/Clankban/releases/latest/download/latest.json"]
+    }
   }
 }

@@ -9,3 +9,6 @@ backups/
 src-tauri/target/
 src-tauri/target-*/
 src-tauri/gen/
+
+# Release output from scripts/release.ps1
+release/

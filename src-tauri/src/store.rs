@@ -6,7 +6,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -57,6 +57,46 @@ impl From<rusqlite::Error> for ApiError {
 
 pub struct Store {
     conn: Mutex<Connection>,
+}
+
+/// A request from the board for a connected agent to run a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunRequest {
+    pub id: i64,
+    pub skill: String,
+    pub arguments: Value,
+    pub status: String,
+    pub result: String,
+    pub created: String,
+    pub updated: String,
+}
+
+pub const RUN_STATUSES: [&str; 5] = ["pending", "running", "done", "failed", "cancelled"];
+
+const RUN_COLUMNS: &str = "id, skill, arguments, status, result, created, updated";
+
+fn row_to_run(row: &Row) -> rusqlite::Result<RunRequest> {
+    let arguments_raw: String = row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "{}".into());
+    Ok(RunRequest {
+        id: row.get(0)?,
+        skill: row.get(1)?,
+        arguments: serde_json::from_str(&arguments_raw).unwrap_or_else(|_| json!({})),
+        status: row.get(3)?,
+        result: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        created: row.get(5)?,
+        updated: row.get(6)?,
+    })
+}
+
+fn read_run(conn: &Connection, id: i64) -> Result<Option<RunRequest>, ApiError> {
+    let run = conn
+        .query_row(
+            &format!("SELECT {RUN_COLUMNS} FROM run_requests WHERE id = ?1"),
+            [id],
+            row_to_run,
+        )
+        .optional()?;
+    Ok(run)
 }
 
 /// (id, title, description, type, priority, status, due, created, subtasks JSON)
@@ -242,6 +282,18 @@ impl Store {
             conn.execute_batch("ALTER TABLE tasks ADD COLUMN parent_id TEXT;")?;
         }
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS run_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill TEXT NOT NULL,
+                arguments TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL,
+                result TEXT NOT NULL DEFAULT '',
+                created TEXT NOT NULL,
+                updated TEXT NOT NULL
+            );",
+        )?;
+
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
         if count == 0 {
             let now = now_iso();
@@ -312,6 +364,45 @@ impl Store {
     pub fn delete(&self, id: &str) -> Result<(), ApiError> {
         self.lock().execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(())
+    }
+
+    pub fn create_run(&self, skill: &str, arguments: &Value) -> Result<RunRequest, ApiError> {
+        let now = now_iso();
+        let args = serde_json::to_string(arguments).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO run_requests (skill, arguments, status, result, created, updated)
+             VALUES (?1, ?2, 'pending', '', ?3, ?3)",
+            params![skill, args, now],
+        )?;
+        let id = conn.last_insert_rowid();
+        read_run(&conn, id)?.ok_or(ApiError::NotFound)
+    }
+
+    /// Requests oldest first, so an agent works the queue in order.
+    pub fn list_runs(&self, status: Option<&str>) -> Result<Vec<RunRequest>, ApiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM run_requests WHERE (?1 IS NULL OR status = ?1) ORDER BY id ASC"
+        ))?;
+        let runs = stmt
+            .query_map([status], row_to_run)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(runs)
+    }
+
+    pub fn update_run(&self, id: i64, status: &str, result: Option<&str>) -> Result<RunRequest, ApiError> {
+        if !RUN_STATUSES.contains(&status) {
+            return Err(ApiError::BadRequest(format!("Unknown status: {status}")));
+        }
+        let conn = self.lock();
+        let current = read_run(&conn, id)?.ok_or(ApiError::NotFound)?;
+        let result = result.map(str::to_string).unwrap_or(current.result);
+        conn.execute(
+            "UPDATE run_requests SET status = ?2, result = ?3, updated = ?4 WHERE id = ?1",
+            params![id, status, result, now_iso()],
+        )?;
+        read_run(&conn, id)?.ok_or(ApiError::NotFound)
     }
 
     /// Compact active-work payload for planning agents.
@@ -424,5 +515,47 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let result = store.update("AT-999", &obj(serde_json::json!({ "title": "x" })));
         assert!(matches!(result, Err(ApiError::NotFound)));
+    }
+
+    #[test]
+    fn new_run_request_is_pending_with_arguments() {
+        let store = Store::open_in_memory().unwrap();
+        let run = store.create_run("import_tasks", &json!({ "source": "notes" })).unwrap();
+        assert_eq!(run.status, "pending");
+        assert_eq!(run.arguments["source"], "notes");
+        assert_eq!(run.result, "");
+    }
+
+    #[test]
+    fn pending_filter_and_oldest_first_order() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.create_run("review_tasks", &json!({})).unwrap();
+        let second = store.create_run("import_tasks", &json!({ "source": "x" })).unwrap();
+        store.update_run(first.id, "done", Some("reviewed 3 items")).unwrap();
+
+        let pending = store.list_runs(Some("pending")).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, second.id);
+        assert_eq!(store.list_runs(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn run_status_updates_keep_previous_result_when_omitted() {
+        let store = Store::open_in_memory().unwrap();
+        let run = store.create_run("review_tasks", &json!({})).unwrap();
+        store.update_run(run.id, "running", None).unwrap();
+        let done = store.update_run(run.id, "done", Some("ok")).unwrap();
+        assert_eq!(done.status, "done");
+        assert_eq!(done.result, "ok");
+        let again = store.update_run(run.id, "cancelled", None).unwrap();
+        assert_eq!(again.result, "ok");
+    }
+
+    #[test]
+    fn unknown_run_status_and_missing_run_are_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        let run = store.create_run("review_tasks", &json!({})).unwrap();
+        assert!(matches!(store.update_run(run.id, "paused", None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.update_run(9999, "done", None), Err(ApiError::NotFound)));
     }
 }

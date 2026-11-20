@@ -13,6 +13,10 @@ cargo tauri build
 
 Run `src-tauri\target\release\bundle\nsis\Clankban_0.1.0_x64-setup.exe`. The installer is unsigned, so Windows SmartScreen may warn on first launch.
 
+### Updates
+
+The desktop app checks for updates at startup, and you can check manually with **Check for updates** in the sidebar. When a newer release is available, **Install** downloads it, verifies its signature, installs it, and restarts Clankban. Updates only apply to the installed version, not the portable exe.
+
 Your data is stored in `%APPDATA%\clankban\clankban.sqlite`. Set `CLANKBAN_DATA_DIR` to use a different folder.
 
 ### Prerequisites for building

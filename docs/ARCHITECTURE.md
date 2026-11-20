@@ -86,6 +86,10 @@ Base URL: `http://127.0.0.1:4187`
 | POST | `/api/tasks` | Create a task. |
 | PATCH | `/api/tasks/:id` | Update a task. |
 | DELETE | `/api/tasks/:id` | Delete a task. |
+| GET | `/api/skills` | List the built-in agent skills (name, description, arguments). |
+| GET | `/api/run-requests?status=pending` | List skill run requests, oldest first. `status` is optional. |
+| POST | `/api/run-requests` | Ask a connected agent to run a skill. Body: `{skill, arguments}`. Unknown skills and missing required arguments return 400. |
+| PATCH | `/api/run-requests/:id` | Update a run request. Body: `{status, result?}`, where status is `pending`, `running`, `done`, `failed`, or `cancelled`. |
 
 `/api/agent-context` intentionally returns a reduced payload: workspace, schema version, counts, and active tasks with IDs, titles, type, priority, status, due date, and subtasks. Agents should use it first, then request individual tasks only when needed.
 
@@ -103,6 +107,15 @@ The bridge also serves MCP prompts, which are agent workflows compiled into `cla
 - `import_tasks(source)` — reads the board, builds an inventory, and creates items only after approval, with `parentId` set explicitly.
 - `update_tasks(changes)` — reads each item with `get_task`, shows planned field changes, and applies them after approval.
 - `review_tasks(scope?)` — read-only health check: overdue, stuck, missing context, orphans, priority mismatches, and duplicates.
+
+Skills are defined once in `src-tauri/src/skills.rs`. The MCP bridge serves them as prompts, and the board's **Agent runs** view sends them to an agent.
+
+**Run queue.** Sending a skill from the board stores a request in the `run_requests` table with status `pending`. The bridge exposes two tools for working the queue:
+
+- `list_run_requests(status?)` — returns pending requests by default. Each one includes a rendered `prompt` the agent can follow.
+- `complete_run_request(id, status, result?)` — the agent sets a request to `running` when it starts, then to `done`, `failed`, or `cancelled` with a short result. The board shows each status, and a pending request can be cancelled from the board.
+
+Requests only run when a connected agent checks the queue, so nothing runs on its own. The skill's approval steps still apply.
 
 Agent tools should remain small and composable. Avoid a single tool that returns the whole workspace by default. Future tools should support delegation, comments, approvals, and activity without making every call expensive.
 
