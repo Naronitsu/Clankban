@@ -2,6 +2,16 @@
 
 Each release has a section headed `## <version>`. The release script copies that section into the update notes, so write it for the people who will read it.
 
+## 0.4.6 — 2026-11-21
+
+- Agents can plan sprints, open and close them, and list them, through MCP. They can only work on their own board, and only one sprint runs at a time.
+- Refusals from the board, such as a second running sprint, now reach agents as errors, not as results.
+- Sprints have their own sidebar item. The sprint manager shows the running sprint at the top, previews a sprint's dates as you type, and keeps the board default in its own section.
+- Views are a sidebar item with a dropdown: create a view, or pick, update or delete a saved view.
+- The task form fits small windows. It scrolls, and Save stays in view.
+- The dashboard no longer shows the board's header, toolbar, filters and stats.
+- A dev script, `scripts/dev.ps1`, runs the app from source beside the installed one, with a demo board.
+
 ## 0.4.5 — 2026-11-21
 
 - Tasks have tags. Important and On hold have one-click toggles in the drawer, and the board filters by tag.

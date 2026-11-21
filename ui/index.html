@@ -44,15 +44,13 @@
         <button class="nav-item" data-view="agent"><span>✦</span> Agent runs <span class="nav-count" id="navAgentCount">0</span></button>
         <button class="nav-item" data-view="docs"><span>❡</span> Project docs</button>
       </nav>
-      <div class="sidebar-label">Saved views</div>
-      <div class="view-picker">
-        <select id="viewPicker" aria-label="Saved views"></select>
-        <div class="view-picker-actions">
-          <button class="button quiet" id="saveView" type="button">Save view…</button>
-          <button class="button quiet danger" id="deleteView" type="button" hidden>Delete view</button>
-        </div>
+      <div class="views-picker" id="viewsPicker">
+        <button class="nav-item views-button" id="viewsButton" type="button" aria-haspopup="true" aria-expanded="false"><span>❖</span> Views <span class="views-caret">▾</span></button>
+        <div class="ws-menu views-menu" id="viewsMenu" hidden></div>
       </div>
+      <button class="nav-item" id="openSprints" type="button"><span>◎</span> Sprints</button>
       <div class="sidebar-spacer"></div>
+
       <div class="agent-status"><span class="status-dot" id="syncDot"></span><div><strong id="syncStatus">Connecting…</strong><small id="syncDetail"></small></div></div>
       <button class="button quiet theme-toggle" id="themeToggle">Dark mode</button>
       <div class="update-panel">
@@ -78,7 +76,7 @@
       <section class="filter-panel" id="filterPanel" hidden aria-label="Filters">
         <label>Priority<select id="filterPriority"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
         <label>Type<select id="filterType"><option value="">Any</option><option value="epic">Epic</option><option value="task">Task</option><option value="subtask">Subtask</option><option value="bug">Bug fix</option></select></label>
-        <label>Tag<select id="filterTag"><option value="">Any</option><option value="important">Important</option><option value="on hold">On hold</option></select></label><label>Sprint<select id="filterSprint"><option value="">Any</option><option value="none">No sprint</option></select></label><button class="button quiet" id="openSprints" type="button">Sprints…</button><label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
+        <label>Tag<select id="filterTag"><option value="">Any</option><option value="important">Important</option><option value="on hold">On hold</option></select></label><label>Sprint<select id="filterSprint"><option value="">Any</option><option value="none">No sprint</option></select></label><label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
         <button class="button quiet" id="clearFilters" type="button">Clear</button>
       </section>
 
@@ -124,27 +122,46 @@
         <div><div class="eyebrow">Board</div><h2 id="sprintTitle">Sprints</h2></div>
         <button class="close-button" id="closeSprints" aria-label="Close">×</button>
       </div>
+      <div id="sprintRunning" class="sprint-running"></div>
+      <div class="sprint-section-title">Other sprints</div>
       <div id="sprintList" class="sprint-list"></div>
       <form id="sprintForm" class="sprint-form" autocomplete="off">
-        <h3>New sprint</h3>
-        <div class="form-grid">
-          <label>Name<input name="name" required placeholder="Sprint 4" /></label>
-          <label>Start<input type="date" name="startDate" /></label>
+        <div class="sprint-section-title">New sprint</div>
+        <label class="sprint-field">Name<input name="name" required placeholder="Sprint 4" /></label>
+        <div class="sprint-row-fields">
+          <label class="sprint-field">Starts<input type="date" name="startDate" /></label>
+          <label class="sprint-field">Length<span class="sprint-length"><input type="number" name="lengthDays" min="1" max="90" placeholder="default" /><em>days</em></span></label>
+          <label class="sprint-field">Or ends on<input type="date" name="endDate" /></label>
         </div>
-        <div class="form-grid">
-          <label>Length in days<input type="number" name="lengthDays" min="1" max="90" placeholder="board default" /></label>
-          <label>Or an end date<input type="date" name="endDate" /></label>
-        </div>
+        <div class="sprint-preview" id="sprintPreview"></div>
         <div class="modal-actions"><button class="button primary" type="submit">Create sprint</button></div>
       </form>
       <form id="sprintDaysForm" class="sprint-form" autocomplete="off">
-        <label>Default length for this board, in days<input type="number" name="days" min="1" max="90" required /></label>
+        <div class="sprint-section-title">Board default</div>
+        <p class="sprint-hint">New sprints use this length when no length or end date is given.</p>
+        <div class="sprint-row-fields">
+          <label class="sprint-field">Length<span class="sprint-length"><input type="number" name="days" min="1" max="90" required /><em>days</em></span></label>
+        </div>
         <div class="modal-actions"><button class="button quiet" type="submit">Save default</button></div>
       </form>
     </div>
   </div>
 
-  <div class="palette-backdrop" id="paletteBackdrop"><div class="palette" role="dialog" aria-label="Command menu"><input id="paletteInput" placeholder="Type a command…" autocomplete="off" /><ul id="paletteList"></ul></div></div>
+  <div class="json-modal-backdrop" id="viewBackdrop">
+    <form class="json-modal view-modal" id="viewForm" autocomplete="off">
+      <div class="modal-header">
+        <div><div class="eyebrow">Board</div><h2>Create view</h2></div>
+        <button type="button" class="close-button" id="closeView" aria-label="Close">×</button>
+      </div>
+      <label class="sprint-field">Name<input name="name" required placeholder="Sprint 4, high priority" /></label>
+      <label class="sprint-field">Shows<select name="layout"><option value="board">Board</option><option value="list">List</option></select></label>
+      <div class="view-summary" id="viewSummary"></div>
+      <div class="modal-actions"><button type="button" class="button quiet" id="cancelView">Cancel</button><button class="button primary" type="submit">Create view</button></div>
+    </form>
+  </div>
+
+  <div class="palette-backdrop" id="paletteBackdrop">
+<div class="palette" role="dialog" aria-label="Command menu"><input id="paletteInput" placeholder="Type a command…" autocomplete="off" /><ul id="paletteList"></ul></div></div>
 
   <div class="modal-backdrop" id="helpBackdrop"><div class="task-modal help-modal"><div class="modal-header"><div><span class="eyebrow">KEYBOARD</span><h2>Shortcuts</h2></div><button type="button" class="close-button" id="closeHelp">×</button></div><table class="help-table"><tbody>
     <tr><td><span class="kbd">Ctrl</span> + <span class="kbd">K</span></td><td>Open command menu</td></tr>

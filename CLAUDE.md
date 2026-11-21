@@ -40,7 +40,10 @@ cargo run -- --api        # headless API on 127.0.0.1:4187
 cargo run -- --mcp        # stdio MCP bridge (uses CLANKBAN_API_URL if set)
 cargo test                # store unit tests
 cargo tauri build         # Windows NSIS installer
+.\scripts\dev.ps1 -Seed   # dev app from source on 127.0.0.1:4188, own data folder, with a demo board
 ```
+
+Use `scripts\dev.ps1` to test changes without installing. It never uses port 4187 or the installed app's data. `-Reset` clears the dev data first.
 
 From the repo root, `scripts\release.ps1 -Version X.Y.Z` builds and signs a release into `release/`. It does not publish.
 

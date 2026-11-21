@@ -484,6 +484,7 @@ async function decideBoardRequest(id, decision) {
 }
 
 function render() {
+  $('#board').classList.toggle('dash-mode', view === 'dashboard');
   renderBoardRequests();
   renderSprintFilter();
   renderViewPicker();
@@ -545,15 +546,38 @@ async function loadViews() {
   }
 }
 
+// The Views button shows the open view's name, or "Views". Its menu lists the board's views, and
+// offers creating a view, plus updating or deleting the open one.
 function renderViewPicker() {
-  const select = $('#viewPicker');
-  if (!select) return;
+  const button = $('#viewsButton');
+  if (!button) return;
   if (activeCustomView && !customViews.some(v => v.id === activeCustomView)) activeCustomView = null;
-  const placeholder = customViews.length ? 'Choose a view…' : 'No saved views yet';
-  select.innerHTML = `<option value="">${placeholder}</option>${customViews.map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('')}`;
-  select.value = activeCustomView ? String(activeCustomView) : '';
-  $('#deleteView').hidden = !activeCustomView;
-  $('#saveView').textContent = activeCustomView ? 'Update view' : 'Save view…';
+  const current = customViews.find(v => v.id === activeCustomView);
+  button.innerHTML = `<span>❖</span> ${escapeHtml(current ? current.name : 'Views')} <span class="views-caret">▾</span>`;
+  if (!$('#viewsMenu').hidden) renderViewsMenu();
+}
+
+function renderViewsMenu() {
+  const current = customViews.find(v => v.id === activeCustomView);
+  const list = customViews.length
+    ? customViews.map(v => `<button type="button" class="ws-item${v.id === activeCustomView ? ' active' : ''}" data-view-id="${v.id}"><span>${escapeHtml(v.name)}</span><small>${v.layout === 'list' ? 'List' : 'Board'}</small></button>`).join('')
+    : '<div class="views-empty">No saved views yet.</div>';
+  const actions = current
+    ? `<div class="views-divider"></div><button type="button" class="ws-item" data-view-action="update">Update “${escapeHtml(current.name)}”</button><button type="button" class="ws-item views-danger" data-view-action="delete">Delete “${escapeHtml(current.name)}”</button>`
+    : '';
+  $('#viewsMenu').innerHTML = `<button type="button" class="ws-item views-create" data-view-action="create">+ Create view…</button><div class="views-divider"></div>${list}${actions}`;
+}
+
+function openViewsMenu(open) {
+  const menu = $('#viewsMenu');
+  if (!menu) return;
+  menu.hidden = !open;
+  $('#viewsButton').setAttribute('aria-expanded', String(open));
+  if (open) renderViewsMenu();
+}
+
+function currentFilterSnapshot() {
+  return { priority: filters.priority, type: filters.type, status: filters.status, tag: filters.tag, sprint: filters.sprint };
 }
 
 function applyCustomView(id) {
@@ -572,29 +596,71 @@ function applyCustomView(id) {
   render();
 }
 
-async function saveCurrentView() {
+function runViewAction(action) {
+  if (action === 'create') return openViewDialog();
+  if (action === 'update') return saveActiveViewChanges();
+  if (action === 'delete') return deleteActiveView();
+}
+
+function openViewDialog() {
   if (!remoteMode) {
     alert('Saved views need the desktop app and its local API.');
     return;
   }
-  const layout = view === 'list' ? 'list' : 'board';
-  const saved = { priority: filters.priority, type: filters.type, status: filters.status, tag: filters.tag, sprint: filters.sprint };
+  const form = $('#viewForm');
+  form.reset();
+  form.elements.layout.value = view === 'list' ? 'list' : 'board';
+  updateViewSummary();
+  $('#viewBackdrop').classList.add('open');
+  form.elements.name.focus();
+}
+
+function closeViewDialog() {
+  $('#viewBackdrop').classList.remove('open');
+}
+
+function updateViewSummary() {
+  const labels = { priority: 'Priority', type: 'Type', status: 'Status', tag: 'Tag', sprint: 'Sprint' };
+  const parts = Object.entries(currentFilterSnapshot())
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${labels[key]}: ${key === 'sprint' ? (value === 'none' ? 'no sprint' : sprintName(value)) : value}`);
+  $('#viewSummary').textContent = parts.length
+    ? `Saves these filters: ${parts.join(', ')}.`
+    : 'Saves no filters: every task on the board.';
+}
+
+async function createViewFromDialog(event) {
+  event.preventDefault();
+  const form = event.target;
+  const name = (form.elements.name.value || '').trim();
+  const layout = form.elements.layout.value;
   try {
-    if (activeCustomView) {
-      const current = customViews.find(v => v.id === activeCustomView);
-      if (!confirm(`Update "${current?.name || 'this view'}" with the current layout and filters?`)) return;
-      await apiRequest(`/api/views/${enc(activeCustomView)}`, { method: 'PATCH', body: JSON.stringify({ layout, filters: saved }) });
-    } else {
-      const name = (prompt('Name for this view, for example "Sprint 4, high priority"') || '').trim();
-      if (!name) return;
-      const result = await apiRequest('/api/views', { method: 'POST', body: JSON.stringify({ workspace, name, layout, filters: saved }) });
-      activeCustomView = result.view.id;
-    }
+    const result = await apiRequest('/api/views', {
+      method: 'POST',
+      body: JSON.stringify({ workspace, name, layout, filters: currentFilterSnapshot() }),
+    });
+    activeCustomView = result.view.id;
+    closeViewDialog();
     await loadViews();
-    renderViewPicker();
     render();
   } catch (error) {
-    alert(`Could not save the view: ${errorText(error)}`);
+    alert(`Could not create the view: ${errorText(error)}`);
+  }
+}
+
+async function saveActiveViewChanges() {
+  if (!activeCustomView) return;
+  const current = customViews.find(v => v.id === activeCustomView);
+  if (!confirm(`Update "${current?.name || 'this view'}" with the current layout and filters?`)) return;
+  try {
+    await apiRequest(`/api/views/${enc(activeCustomView)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ layout: view === 'list' ? 'list' : 'board', filters: currentFilterSnapshot() }),
+    });
+    await loadViews();
+    render();
+  } catch (error) {
+    alert(`Could not update the view: ${errorText(error)}`);
   }
 }
 
@@ -606,19 +672,18 @@ async function deleteActiveView() {
     await apiRequest(`/api/views/${enc(activeCustomView)}`, { method: 'DELETE' });
     activeCustomView = null;
     await loadViews();
-    renderViewPicker();
     render();
   } catch (error) {
     alert(`Could not delete the view: ${errorText(error)}`);
   }
 }
 
-$('#viewPicker').onchange = e => {
-  if (e.target.value) applyCustomView(e.target.value);
-  else { activeCustomView = null; render(); }
-};
-$('#saveView').onclick = saveCurrentView;
-$('#deleteView').onclick = deleteActiveView;
+$('#viewsButton').onclick = () => openViewsMenu($('#viewsMenu').hidden);
+$('#viewForm').onsubmit = createViewFromDialog;
+$('#closeView').onclick = closeViewDialog;
+$('#cancelView').onclick = closeViewDialog;
+$('#viewBackdrop').addEventListener('click', e => { if (e.target.id === 'viewBackdrop') closeViewDialog(); });
+
 
 // ---- sprints ---------------------------------------------------------------
 // A sprint is a time box on one board, with a start and an end. One sprint runs at a time in a
@@ -663,11 +728,10 @@ function renderSprintSelect() {
 function sprintRow(s) {
   const actions = [];
   if (s.status === 'planned') actions.push(`<button type="button" class="button quiet" data-sprint-action="start" data-sprint-id="${s.id}">Start</button>`);
-  if (s.status === 'active') actions.push(`<button type="button" class="button quiet" data-sprint-action="close" data-sprint-id="${s.id}">Close</button>`);
   actions.push(`<button type="button" class="button quiet danger" data-sprint-action="delete" data-sprint-id="${s.id}">Delete</button>`);
   return `<div class="sprint-row">
-      <div>
-        <strong>${escapeHtml(s.name)}</strong> <span class="sprint-status ${escapeHtml(s.status)}">${escapeHtml(sprintStatusLabel(s.status))}</span>
+      <div class="sprint-row-main">
+        <div><strong>${escapeHtml(s.name)}</strong> <span class="sprint-status ${escapeHtml(s.status)}">${escapeHtml(sprintStatusLabel(s.status))}</span></div>
         <div class="sprint-meta">${formatDate(s.startDate)} to ${formatDate(s.endDate)} · ${s.tasks} task${s.tasks === 1 ? '' : 's'}</div>
       </div>
       <div class="sprint-actions">${actions.join('')}</div>
@@ -675,9 +739,49 @@ function sprintRow(s) {
 }
 
 function renderSprintManager() {
-  $('#sprintList').innerHTML = sprints.length
-    ? sprints.map(sprintRow).join('')
-    : '<div class="empty-note">No sprints yet. Create one below.</div>';
+  const running = sprints.find(s => s.status === 'active');
+  $('#sprintRunning').innerHTML = running
+    ? `<div class="sprint-running-card">
+        <div class="sprint-running-main">
+          <span class="sprint-status active">Running now</span>
+          <strong>${escapeHtml(running.name)}</strong>
+          <span class="sprint-meta">${formatDate(running.startDate)} to ${formatDate(running.endDate)} · ${running.tasks} task${running.tasks === 1 ? '' : 's'}</span>
+        </div>
+        <button type="button" class="button quiet" data-sprint-action="close" data-sprint-id="${running.id}">Close sprint</button>
+      </div>`
+    : '<div class="sprint-hint">No sprint is running. Start one from the list below.</div>';
+  const others = sprints.filter(s => s !== running);
+  $('#sprintList').innerHTML = others.length
+    ? others.map(sprintRow).join('')
+    : '<div class="empty-note">No other sprints yet. Create one below.</div>';
+}
+
+// Shows what the new sprint will cover, as the form is filled in.
+function updateSprintPreview() {
+  const form = $('#sprintForm');
+  const preview = $('#sprintPreview');
+  if (!form || !preview) return;
+  const boardDefault = currentWorkspace()?.sprintDays || 14;
+  const typedLength = Number(form.elements.lengthDays.value);
+  const typedEnd = form.elements.endDate.value;
+  const startDay = new Date(`${form.elements.startDate.value || todayStr()}T00:00:00`);
+  let endDay;
+  if (typedEnd) {
+    endDay = new Date(`${typedEnd}T00:00:00`);
+  } else {
+    endDay = new Date(startDay);
+    endDay.setDate(endDay.getDate() + (typedLength || boardDefault) - 1);
+  }
+  const days = Math.round((endDay - startDay) / 86400000) + 1;
+  if (!(days >= 1) || Number.isNaN(days)) {
+    preview.textContent = 'The end date must fall on or after the start.';
+    preview.classList.add('bad');
+    return;
+  }
+  preview.classList.remove('bad');
+  const fmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const source = typedEnd ? 'ends on the date you chose' : typedLength ? 'your length' : `board default of ${boardDefault} days`;
+  preview.textContent = `${fmt(startDay)} to ${fmt(endDay)} · ${days} day${days === 1 ? '' : 's'} (${source})`;
 }
 
 function openSprintManager() {
@@ -687,7 +791,9 @@ function openSprintManager() {
   }
   renderSprintManager();
   $('#sprintDaysForm').elements.days.value = currentWorkspace()?.sprintDays || 14;
+  $('#sprintForm').reset();
   $('#sprintForm').elements.startDate.value = todayStr();
+  updateSprintPreview();
   $('#sprintBackdrop').classList.add('open');
 }
 
@@ -726,6 +832,7 @@ async function createSprintFromForm(event) {
     await apiRequest('/api/sprints', { method: 'POST', body: JSON.stringify(body) });
     form.reset();
     form.elements.startDate.value = todayStr();
+    updateSprintPreview();
     await loadSprints();
     renderSprintManager();
     render();
@@ -740,6 +847,7 @@ async function saveSprintDays(event) {
   try {
     await apiRequest(`/api/workspaces/${enc(workspace)}/sprint-days`, { method: 'PUT', body: JSON.stringify({ days }) });
     await loadWorkspaces();
+    updateSprintPreview();
     render();
   } catch (error) {
     alert(`Could not save the default length: ${errorText(error)}`);
@@ -750,7 +858,9 @@ $('#openSprints').onclick = openSprintManager;
 $('#closeSprints').onclick = closeSprintManager;
 $('#sprintBackdrop').addEventListener('click', e => { if (e.target.id === 'sprintBackdrop') closeSprintManager(); });
 $('#sprintForm').onsubmit = createSprintFromForm;
+$('#sprintForm').addEventListener('input', updateSprintPreview);
 $('#sprintDaysForm').onsubmit = saveSprintDays;
+
 
 // ---- dashboard -------------------------------------------------------------
 // The first screen. "All boards" covers every workspace; a workspace's own dashboard opens from its
@@ -842,7 +952,7 @@ function renderDashboard() {
     : '<div class="empty-note">No changes recorded yet.</div>';
 
   box.innerHTML = `
-    <div class="stats-row">
+    <div class="stats-row dash-stats">
       ${stat('Active work', totals.active)}
       ${stat('High priority', totals.highPriority)}
       ${stat(dueLabel, totals.dueSoon)}
@@ -1903,6 +2013,7 @@ function closeTop() {
   if (isOpen('#helpBackdrop')) return closeHelp();
   if (isOpen('#changelogBackdrop')) return closeNotes();
   if (isOpen('#sprintBackdrop')) return closeSprintManager();
+  if (isOpen('#viewBackdrop')) return closeViewDialog();
   if (isOpen('#jsonModalBackdrop')) return $('#jsonModalBackdrop').classList.remove('open');
   if (isOpen('#modalBackdrop')) return closeModal();
   if (isOpen('#taskDrawer')) return closeDrawer();
@@ -2025,6 +2136,17 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('click', e => {
+  const viewItem = e.target.closest('[data-view-id]');
+  if (viewItem && viewItem.closest('#viewsMenu')) {
+    openViewsMenu(false);
+    return applyCustomView(viewItem.dataset.viewId);
+  }
+  const viewAction = e.target.closest('[data-view-action]');
+  if (viewAction && viewAction.closest('#viewsMenu')) {
+    openViewsMenu(false);
+    return runViewAction(viewAction.dataset.viewAction);
+  }
+  if (!e.target.closest('#viewsPicker')) openViewsMenu(false);
   const sprintButton = e.target.closest('[data-sprint-action]');
   if (sprintButton) return sprintAction(sprintButton.dataset.sprintId, sprintButton.dataset.sprintAction);
   const dashTask = e.target.closest('[data-dash-task]');

@@ -342,3 +342,99 @@ html, body { height: 100%; }
 .view-picker select option { background: var(--surface); color: var(--ink); }
 .view-picker-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .view-picker-actions .button { flex: 1; font-size: 12px; padding: 6px 8px; }
+
+/* Sidebar: the Views dropdown and the Sprints button. */
+.sidebar-tools { display: flex; gap: 6px; padding: 0 4px 4px; align-items: stretch; }
+.views-picker { position: relative; flex: 1; min-width: 0; }
+.views-picker .views-button { width: 100%; display: flex; justify-content: space-between; align-items: center; }
+.views-caret { font-size: 11px; opacity: 0.7; margin-left: 4px; }
+.views-menu { top: calc(100% + 6px); min-width: 240px; max-height: 60vh; overflow-y: auto; z-index: 40; }
+.views-menu .ws-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.views-menu .ws-item small { color: var(--muted); font-size: 11px; }
+.views-menu .ws-item.active span { font-weight: 600; }
+.views-divider { height: 1px; background: var(--line); margin: 6px 4px; }
+.views-empty { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+.views-danger { color: var(--danger) !important; }
+.view-modal { width: min(460px, calc(100vw - 32px)); }
+.view-summary { font-size: 12px; color: var(--muted); margin: -4px 0 16px; }
+
+/* Sprint manager. */
+.sprint-modal { width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; }
+.sprint-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 18px 0 8px; }
+.sprint-running { margin-bottom: 4px; }
+.sprint-running-card { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 16px; border-radius: 12px; background: var(--ok-soft); border: 1px solid transparent; }
+.sprint-running-main { display: flex; flex-direction: column; gap: 4px; }
+.sprint-running-main strong { font-size: 15px; }
+.sprint-hint { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+.sprint-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 4px; }
+.sprint-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sprint-row:last-child { border-bottom: 0; }
+.sprint-row-main { min-width: 0; }
+.sprint-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.sprint-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.sprint-actions .button { font-size: 12px; padding: 6px 10px; }
+.sprint-form { margin-top: 4px; }
+.sprint-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 12px; }
+.sprint-row-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.sprint-length { display: flex; align-items: center; gap: 6px; }
+.sprint-length input { flex: 1; min-width: 0; }
+.sprint-length em { font-style: normal; font-size: 12px; color: var(--muted); font-weight: 500; }
+.sprint-modal input { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); font: inherit; font-size: 13px; font-weight: 400; }
+.sprint-modal input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.sprint-preview { font-size: 13px; color: var(--ink-2); padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px dashed var(--line); margin-bottom: 14px; }
+.sprint-preview.bad { color: var(--danger); }
+.sprint-status { font: 600 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; background: var(--hover); color: var(--muted); margin-left: 4px; }
+.sprint-status.active { background: var(--ok-soft); color: var(--ok); }
+.sprint-status.planned { background: var(--accent-soft); color: var(--accent); }
+.tag-chip.sprint-chip { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+@media (max-width: 560px) { .sprint-row-fields { grid-template-columns: 1fr; } }
+
+/* Task form: scrolls inside the window on short screens; Save stays in view. */
+#taskForm.task-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 22px 24px 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 14px;
+  align-content: start;
+}
+#taskForm.task-modal > label { grid-column: span 1; }
+#taskForm.task-modal > label:has(textarea),
+#taskForm.task-modal > label:has(input[name="title"]),
+#taskForm.task-modal > label:has(input[name="links"]),
+#taskForm.task-modal > label:has(input[name="docs"]),
+#taskForm.task-modal > label:has(input[name="tags"]),
+#taskForm.task-modal > label:has(input[name="standaloneNote"]),
+#taskForm.task-modal > label.check-row { grid-column: 1 / -1; }
+#taskForm.task-modal > .modal-header,
+#taskForm.task-modal > .form-grid,
+#taskForm.task-modal > .modal-note { grid-column: 1 / -1; }
+#taskForm.task-modal > .modal-actions {
+  grid-column: 1 / -1;
+  position: sticky;
+  bottom: 0;
+  margin: 12px -24px 0;
+  padding: 14px 24px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+#taskForm .form-grid { grid-column: 1 / -1; }
+@media (max-width: 600px) {
+  #taskForm.task-modal { grid-template-columns: 1fr; }
+}
+
+/* Dashboard mode: the board's header, toolbar, filters and stats are not shown. */
+.dash-mode .page-heading,
+.dash-mode .stats-row:not(.dash-stats),
+.dash-mode .board-toolbar,
+.dash-mode .filter-panel { display: none !important; }
+
+/* Sprints get their own sidebar section, below Views. */
+.sidebar-tools .sprint-button { width: 100%; font-size: 13px; padding: 8px 10px; }
+
+/* Views dropdown inside the sidebar navigation, in the same style as the other items. */
+.views-picker { position: relative; }
+.views-picker .views-button { width: 100%; }
+.views-caret { margin-left: auto; font-size: 11px; opacity: 0.7; }

@@ -224,6 +224,35 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             )
             .await
         }
+        "list_sprints" => {
+            let workspace = resolve_board(&args, base).await?;
+            let encoded = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
+            http("GET", format!("{base}/api/sprints?workspace={encoded}"), None, Vec::new()).await
+        }
+        "start_sprint" | "close_sprint" => {
+            // Only sprints on this agent's board can be opened or closed from here.
+            let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| "id is required".to_string())?;
+            let status = if name == "start_sprint" { "active" } else { "closed" };
+            let workspace = resolve_board(&args, base).await?;
+            let encoded = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
+            let listed = http("GET", format!("{base}/api/sprints?workspace={encoded}"), None, Vec::new()).await?;
+            let on_board = listed
+                .get("sprints")
+                .and_then(Value::as_array)
+                .map(|sprints| sprints.iter().any(|s| s.get("id").and_then(Value::as_i64) == Some(id)))
+                .unwrap_or(false);
+            if !on_board {
+                return Err(format!("sprint {id} is not on this board ({workspace}). Call list_sprints to see this board's sprints. Nothing was changed."));
+            }
+            http("PATCH", format!("{base}/api/sprints/{id}"), Some(json!({ "status": status })), identity).await
+        }
+        "create_sprint" => {
+            // Agents plan sprints; a sprint is created planned. Starting and closing stay with the person.
+            let workspace = resolve_board(&args, base).await?;
+            let mut body = args.clone();
+            body["workspace"] = json!(workspace);
+            http("POST", format!("{base}/api/sprints"), Some(body), identity).await
+        }
         "resolve_workspace" => {
             let folder = project_folder(&args)?;
             let encoded = utf8_percent_encode(&folder, NON_ALPHANUMERIC);
@@ -317,7 +346,14 @@ async fn http(
         };
         let response = match response {
             Ok(response) => response,
-            Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Status(code, response)) => {
+                // A refusal from the board (for example a second running sprint) is a tool error, not a result.
+                let message = response
+                    .into_json::<Value>()
+                    .ok()
+                    .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_string));
+                return Err(message.unwrap_or_else(|| format!("the board answered HTTP {code}")));
+            }
             Err(e) => return Err(e.to_string()),
         };
         response.into_json::<Value>().map_err(|e| e.to_string())
@@ -478,6 +514,58 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "list_sprints",
+            "description": "List the sprints on this board, with their ids, dates, status (planned, active, or closed) and task counts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": { "type": "string", "description": "Board id. Optional: defaults to this project's board." }
+                }
+            }
+        },
+        {
+            "name": "start_sprint",
+            "description": format!("Open a planned sprint on this board, so it becomes the running sprint. Only one sprint runs at a time: if another is running, close it first with close_sprint.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Sprint id from list_sprints or get_agent_context." },
+                    "workspace": { "type": "string", "description": "Board id. Optional: defaults to this project's board." },
+                    "model": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "close_sprint",
+            "description": format!("Close a sprint on this board when it is finished. A closed sprint keeps its tasks and dates.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Sprint id from list_sprints or get_agent_context." },
+                    "workspace": { "type": "string", "description": "Board id. Optional: defaults to this project's board." },
+                    "model": { "type": "string" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "create_sprint",
+            "description": format!("Plan a sprint on this board. Give a name, a start date (YYYY-MM-DD, default today), and either a length in days or an end date; the board's default length is used when neither is given. The sprint is created planned, not running: a person starts it. Assign tasks to it with the sprint field.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": { "type": "string", "description": "Board id. Optional: defaults to the board for this project folder." },
+                    "name": { "type": "string" },
+                    "startDate": { "type": "string", "description": "YYYY-MM-DD" },
+                    "lengthDays": { "type": "integer", "description": "1 to 90 days" },
+                    "endDate": { "type": "string", "description": "YYYY-MM-DD, instead of lengthDays" },
+                    "model": { "type": "string" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
             "name": "list_workspaces",
             "description": "List the workspaces on this board, with how many tasks each holds.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -558,7 +646,7 @@ mod tests {
     #[test]
     fn tool_list_includes_workspace_and_history_tools() {
         let names = names();
-        for expected in ["list_workspaces", "add_comment", "resolve_workspace", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
+        for expected in ["list_workspaces", "list_sprints", "start_sprint", "close_sprint", "create_sprint", "add_comment", "resolve_workspace", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
     }
