@@ -1,12 +1,17 @@
 //! Local HTTP API, identical in routes and payloads to the original Node server,
-//! plus skill discovery and the agent run-request queue.
+//! plus skill discovery, the agent run-request queue, workspaces, and change history.
+//!
+//! Callers identify themselves with request headers, which become the actor on history entries:
+//! - `X-Clankban-Actor`: `human` (the board), `agent`, or `api` (the default)
+//! - `X-Clankban-Client`: the client's name, for example `Claude Code`
+//! - `X-Clankban-Model`: the model that made the change, for example `claude-haiku-5-5`
 
 use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
     extract::State,
-    http::{header, HeaderValue, Method, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     response::Response,
     Router,
 };
@@ -15,9 +20,11 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::skills;
-use crate::store::{ApiError, Store};
+use crate::store::{Actor, ApiError, Store, DEFAULT_WORKSPACE};
 
 pub type SharedStore = Arc<Store>;
+
+const ALLOWED_HEADERS: &str = "content-type, x-clankban-actor, x-clankban-client, x-clankban-model";
 
 pub fn router(store: SharedStore) -> Router {
     Router::new().fallback(handle).with_state(store)
@@ -27,7 +34,41 @@ pub async fn serve(listener: tokio::net::TcpListener, store: SharedStore) -> std
     axum::serve(listener, router(store)).await
 }
 
-async fn handle(State(store): State<SharedStore>, method: Method, uri: Uri, body: Bytes) -> Response {
+fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Who is calling, from the identity headers. Unknown or missing values fall back to `api`.
+pub fn actor_from(headers: &HeaderMap) -> Actor {
+    let kind = header_text(headers, "x-clankban-actor").unwrap_or_else(|| "api".into());
+    let model = header_text(headers, "x-clankban-model").unwrap_or_default();
+    match kind.as_str() {
+        "human" => Actor { kind, name: header_text(headers, "x-clankban-client").unwrap_or_else(|| "Board".into()), model },
+        "agent" => Actor {
+            kind,
+            name: header_text(headers, "x-clankban-client").unwrap_or_else(|| "Agent".into()),
+            model,
+        },
+        _ => Actor {
+            kind: "api".into(),
+            name: header_text(headers, "x-clankban-client").unwrap_or_else(|| "API".into()),
+            model,
+        },
+    }
+}
+
+async fn handle(
+    State(store): State<SharedStore>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if method == Method::OPTIONS {
         return preflight();
     }
@@ -35,13 +76,14 @@ async fn handle(State(store): State<SharedStore>, method: Method, uri: Uri, body
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| uri.path().to_string());
-    match tokio::task::spawn_blocking(move || route(&store, &method, &target, &body)).await {
+    let actor = actor_from(&headers);
+    match tokio::task::spawn_blocking(move || route(&store, &method, &target, &body, &actor)).await {
         Ok((status, value)) => respond(status, &value),
         Err(_) => respond(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "Internal error" })),
     }
 }
 
-fn route(store: &Store, method: &Method, target: &str, body: &[u8]) -> (StatusCode, Value) {
+fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Actor) -> (StatusCode, Value) {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let method = method.as_str();
 
@@ -50,14 +92,31 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8]) -> (StatusCo
             return (StatusCode::OK, json!({ "ok": true, "app": "clankban", "version": "0.1.0" }));
         }
         ("GET", "/api/tasks") => {
-            return reply(store.list().map(|tasks| json!({ "tasks": tasks })), StatusCode::OK);
+            let workspace = query_param(query, "workspace");
+            return reply(
+                store.list(workspace.as_deref()).map(|tasks| json!({ "tasks": tasks })),
+                StatusCode::OK,
+            );
         }
         ("GET", "/api/agent-context") => {
-            return reply(store.agent_context(), StatusCode::OK);
+            let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            return reply(store.agent_context(&workspace), StatusCode::OK);
         }
         ("POST", "/api/tasks") => {
             return match parse_body(body) {
-                Ok(input) => reply(store.create(&input), StatusCode::CREATED),
+                Ok(input) => reply(store.create(&input, actor), StatusCode::CREATED),
+                Err(response) => response,
+            };
+        }
+        ("GET", "/api/workspaces") => {
+            return reply(store.list_workspaces().map(|ws| json!({ "workspaces": ws })), StatusCode::OK);
+        }
+        ("POST", "/api/workspaces") => {
+            return match parse_body(body) {
+                Ok(input) => {
+                    let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+                    reply(store.create_workspace(name), StatusCode::CREATED)
+                }
                 Err(response) => response,
             };
         }
@@ -90,9 +149,36 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8]) -> (StatusCo
         };
     }
 
-    if let Some(raw_id) = path.strip_prefix("/api/tasks/") {
-        if !raw_id.is_empty() && !raw_id.contains('/') {
-            let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
+    if let Some(raw_id) = path.strip_prefix("/api/workspaces/") {
+        let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
+        return match method {
+            "PATCH" => match parse_body(body) {
+                Ok(input) => {
+                    let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+                    match store.rename_workspace(&id, name).and_then(|_| store.list_workspaces()) {
+                        Ok(all) => (StatusCode::OK, json!({ "workspaces": all })),
+                        Err(e) => workspace_error(e),
+                    }
+                }
+                Err(response) => response,
+            },
+            "DELETE" => match store.delete_workspace(&id) {
+                Ok(()) => (StatusCode::OK, json!({ "deleted": id })),
+                Err(e) => workspace_error(e),
+            },
+            _ => (StatusCode::NOT_FOUND, json!({ "error": "Route not found" })),
+        };
+    }
+
+    if let Some(rest) = path.strip_prefix("/api/tasks/") {
+        if let Some(raw_id) = rest.strip_suffix("/history") {
+            if method == "GET" && !raw_id.is_empty() && !raw_id.contains('/') {
+                let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
+                return reply(store.history(&id).map(|entries| json!({ "history": entries })), StatusCode::OK);
+            }
+        }
+        if !rest.is_empty() && !rest.contains('/') {
+            let id = percent_decode_str(rest).decode_utf8_lossy().into_owned();
             return match method {
                 "GET" => match store.get(&id) {
                     Ok(Some(task)) => reply(Ok(task), StatusCode::OK),
@@ -100,10 +186,10 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8]) -> (StatusCo
                     Err(e) => error(e),
                 },
                 "PATCH" => match parse_body(body) {
-                    Ok(input) => reply(store.update(&id, &input), StatusCode::OK),
+                    Ok(input) => reply(store.update(&id, &input, actor), StatusCode::OK),
                     Err(response) => response,
                 },
-                "DELETE" => match store.delete(&id) {
+                "DELETE" => match store.delete(&id, actor) {
                     Ok(()) => (StatusCode::OK, json!({ "deleted": id })),
                     Err(e) => error(e),
                 },
@@ -152,6 +238,14 @@ fn reply<T: Serialize>(result: Result<T, ApiError>, ok_status: StatusCode) -> (S
     }
 }
 
+/// Like `error`, but says "Workspace not found" when a workspace is missing.
+fn workspace_error(e: ApiError) -> (StatusCode, Value) {
+    match e {
+        ApiError::NotFound => (StatusCode::NOT_FOUND, json!({ "error": "Workspace not found" })),
+        other => error(other),
+    }
+}
+
 fn error(e: ApiError) -> (StatusCode, Value) {
     match e {
         ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, json!({ "error": message })),
@@ -181,7 +275,7 @@ fn respond(status: StatusCode, value: &Value) -> Response {
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
-    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static(ALLOWED_HEADERS));
     response
 }
 
@@ -194,6 +288,43 @@ fn preflight() -> Response {
         header::ACCESS_CONTROL_ALLOW_METHODS,
         HeaderValue::from_static("GET,POST,PATCH,DELETE,OPTIONS"),
     );
-    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static(ALLOWED_HEADERS));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actor_defaults_to_api_without_headers() {
+        let actor = actor_from(&HeaderMap::new());
+        assert_eq!(actor.kind, "api");
+        assert_eq!(actor.name, "API");
+        assert_eq!(actor.model, "");
+    }
+
+    #[test]
+    fn agent_headers_become_actor() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-clankban-actor", HeaderValue::from_static("agent"));
+        headers.insert("x-clankban-client", HeaderValue::from_static("Claude Code"));
+        headers.insert("x-clankban-model", HeaderValue::from_static("claude-haiku-5-5"));
+        let actor = actor_from(&headers);
+        assert_eq!(actor.kind, "agent");
+        assert_eq!(actor.label(), "Claude Code (claude-haiku-5-5)");
+    }
+
+    #[test]
+    fn board_actor_is_human() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-clankban-actor", HeaderValue::from_static("human"));
+        assert_eq!(actor_from(&headers).kind, "human");
+    }
+
+    #[test]
+    fn query_params_are_decoded() {
+        assert_eq!(query_param("workspace=home%20reno&x=1", "workspace").as_deref(), Some("home reno"));
+        assert_eq!(query_param("x=1", "workspace"), None);
+    }
 }

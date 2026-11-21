@@ -68,6 +68,13 @@ The current SQLite `tasks` table contains:
 | `subtasks` | JSON array for embedded checklist items. |
 | `updated` | ISO timestamp for the latest mutation. |
 | `parent_id` | Optional stable ID of a parent task. |
+| `workspace_id` | The workspace the task belongs to. Defaults to `default`. |
+
+`workspaces` holds `id`, `name`, and `created`. The `default` workspace always exists and cannot be deleted. A workspace can only be deleted once it has no tasks.
+
+`task_history` is append-only. Each row records the task, the time, the action (`created`, `updated`, or `deleted`), the actor (`kind`, `name`, `model`), the field changes as `{field: {from, to}}`, and a readable summary. History survives deletion of its task, so the record of what happened is kept.
+
+The actor comes from request headers: `X-Clankban-Actor` (`human` for the board, `agent` for MCP clients, `api` by default), `X-Clankban-Client` (the client name; for MCP clients, the name and version from the handshake), and `X-Clankban-Model` (the model that made the change, when the client reports it).
 
 `todo` is accepted as an input alias and returned as `backlog` so imported tasks never become invisible to the board.
 
@@ -86,6 +93,11 @@ Base URL: `http://127.0.0.1:4187`
 | POST | `/api/tasks` | Create a task. |
 | PATCH | `/api/tasks/:id` | Update a task. |
 | DELETE | `/api/tasks/:id` | Delete a task. |
+| GET | `/api/tasks/:id/history` | Change history for a task, newest first. |
+| GET | `/api/workspaces` | List workspaces with their task counts. |
+| POST | `/api/workspaces` | Create a workspace. Body: `{name}`. The id is derived from the name. |
+| PATCH | `/api/workspaces/:id` | Rename a workspace. Body: `{name}`. |
+| DELETE | `/api/workspaces/:id` | Delete an empty workspace. The default workspace cannot be deleted. |
 | GET | `/api/skills` | List the built-in agent skills (name, description, arguments). |
 | GET | `/api/run-requests?status=pending` | List skill run requests, oldest first. `status` is optional. |
 | POST | `/api/run-requests` | Ask a connected agent to run a skill. Body: `{skill, arguments}`. Unknown skills and missing required arguments return 400. |
@@ -97,10 +109,14 @@ Base URL: `http://127.0.0.1:4187`
 
 The local stdio server exposes:
 
-- `get_agent_context(status?)` — compact planning context.
+- `get_agent_context(status?, workspace?)` — compact planning context for one workspace (default `default`).
 - `get_task(id)` — focused task lookup.
-- `create_task(title, description?, type?, priority?, status?, due?, parentId?, subtasks?)`.
-- `update_task(id, title?, description?, priority?, status?, due?, parentId?)`.
+- `get_task_history(id)` — who changed the task, when, which fields, and the model they reported.
+- `create_task(title, description?, type?, priority?, status?, due?, parentId?, subtasks?, workspace?, model?)`.
+- `update_task(id, title?, description?, priority?, status?, due?, parentId?, workspace?, model?)`. Setting `workspace` moves the task.
+- `list_workspaces()` and `create_workspace(name, model?)`.
+
+The MCP client's name and version come from the handshake. The model comes from the `model` argument, which the bridge sends as a header and does not store in the task itself. Write tools record both in the task's history.
 
 The bridge also serves MCP prompts, which are agent workflows compiled into `clankban.exe` from `src-tauri/skills/`. They are listed with `prompts/list` and rendered with `prompts/get`. They are not local Claude skills, so any MCP client connected to the bridge gets them:
 

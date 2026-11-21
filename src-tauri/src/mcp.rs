@@ -1,5 +1,9 @@
 //! Stdio MCP bridge for local agents. Every tool call is forwarded to the
 //! local HTTP API, so the board and agents share one source of truth.
+//!
+//! Each call identifies the agent in request headers, so the board's change history can say
+//! which client and model made it. The client name comes from the MCP handshake; the model
+//! comes from the optional `model` argument on write tools.
 
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::{json, Value};
@@ -13,6 +17,7 @@ pub async fn run(api_url: String) -> std::io::Result<()> {
     let base = api_url.trim_end_matches('/').to_string();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
+    let mut client = String::from("Agent");
 
     while let Some(line) = lines.next_line().await? {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
@@ -27,15 +32,18 @@ pub async fn run(api_url: String) -> std::io::Result<()> {
         };
 
         let outcome: Result<Value, (i64, String)> = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {}, "prompts": {} },
-                "serverInfo": { "name": "clankban", "version": "0.1.0" }
-            })),
+            "initialize" => {
+                client = client_name(message.get("params").unwrap_or(&Value::Null));
+                Ok(json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": { "tools": {}, "prompts": {} },
+                    "serverInfo": { "name": "clankban", "version": "0.1.0" }
+                }))
+            }
             "tools/list" => Ok(json!({ "tools": tool_definitions() })),
             "tools/call" => {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);
-                match call_tool(&base, &params).await {
+                match call_tool(&base, &client, &params).await {
                     Ok(value) => Ok(json!({
                         "content": [{ "type": "text", "text": value.to_string() }]
                     })),
@@ -62,6 +70,15 @@ pub async fn run(api_url: String) -> std::io::Result<()> {
     Ok(())
 }
 
+/// "name version" from the handshake's clientInfo, e.g. "claude-code 2.1.0".
+fn client_name(params: &Value) -> String {
+    let name = params["clientInfo"]["name"].as_str().unwrap_or("Agent");
+    match params["clientInfo"]["version"].as_str() {
+        Some(version) if !version.is_empty() => format!("{name} {version}"),
+        _ => name.to_string(),
+    }
+}
+
 fn prompt_get(params: &Value) -> Result<Value, (i64, String)> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let skill = skills::find(name).ok_or((-32602, format!("Unknown prompt: {name}")))?;
@@ -78,13 +95,31 @@ fn prompt_get(params: &Value) -> Result<Value, (i64, String)> {
     }))
 }
 
-async fn call_tool(base: &str, params: &Value) -> Result<Value, String> {
+/// Removes `model` from the arguments and returns it, so it can travel as a header instead.
+fn take_model(args: &mut Value) -> String {
+    args.as_object_mut()
+        .and_then(|map| map.remove("model"))
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, String> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let model = take_model(&mut args);
+    let identity = identity_headers(client, &model);
 
     match name {
         "get_agent_context" => {
-            let mut context = http("GET", format!("{base}/api/agent-context"), None).await?;
+            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
+            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let mut context = http(
+                "GET",
+                format!("{base}/api/agent-context?workspace={encoded}"),
+                None,
+                identity,
+            )
+            .await?;
             if let Some(status) = args.get("status").and_then(Value::as_str) {
                 if let Some(Value::Array(tasks)) = context.get_mut("tasks") {
                     tasks.retain(|t| t.get("status").and_then(Value::as_str) == Some(status));
@@ -94,21 +129,30 @@ async fn call_tool(base: &str, params: &Value) -> Result<Value, String> {
         }
         "get_task" => {
             let id = required_str(&args, "id")?;
-            http("GET", task_url(base, id), None).await
+            http("GET", task_url(base, id), None, Vec::new()).await
         }
-        "create_task" => http("POST", format!("{base}/api/tasks"), Some(args)).await,
+        "get_task_history" => {
+            let id = required_str(&args, "id")?;
+            http("GET", format!("{}/history", task_url(base, id)), None, Vec::new()).await
+        }
+        "create_task" => http("POST", format!("{base}/api/tasks"), Some(args), identity).await,
         "update_task" => {
             let id = required_str(&args, "id")?.to_string();
             let mut patch = args.clone();
             if let Some(map) = patch.as_object_mut() {
                 map.remove("id");
             }
-            http("PATCH", task_url(base, &id), Some(patch)).await
+            http("PATCH", task_url(base, &id), Some(patch), identity).await
+        }
+        "list_workspaces" => http("GET", format!("{base}/api/workspaces"), None, Vec::new()).await,
+        "create_workspace" => {
+            let name = required_str(&args, "name")?;
+            http("POST", format!("{base}/api/workspaces"), Some(json!({ "name": name })), identity).await
         }
         "list_run_requests" => {
             let status = args.get("status").and_then(Value::as_str).unwrap_or("pending");
             let encoded = utf8_percent_encode(status, NON_ALPHANUMERIC);
-            let mut body = http("GET", format!("{base}/api/run-requests?status={encoded}"), None).await?;
+            let mut body = http("GET", format!("{base}/api/run-requests?status={encoded}"), None, Vec::new()).await?;
             let mut requests = match body.get_mut("runs").map(Value::take) {
                 Some(Value::Array(runs)) => runs,
                 _ => Vec::new(),
@@ -136,10 +180,18 @@ async fn call_tool(base: &str, params: &Value) -> Result<Value, String> {
             if let Some(result) = args.get("result").and_then(Value::as_str) {
                 patch["result"] = Value::String(result.to_string());
             }
-            http("PATCH", format!("{base}/api/run-requests/{id}"), Some(patch)).await
+            http("PATCH", format!("{base}/api/run-requests/{id}"), Some(patch), identity).await
         }
         _ => Err("Unknown tool".to_string()),
     }
+}
+
+fn identity_headers(client: &str, model: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("X-Clankban-Actor", "agent".to_string()),
+        ("X-Clankban-Client", client.to_string()),
+        ("X-Clankban-Model", model.to_string()),
+    ]
 }
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -154,9 +206,17 @@ fn task_url(base: &str, id: &str) -> String {
 
 /// Performs a blocking HTTP call off the async runtime. Error statuses still
 /// return their JSON body, matching how the Node bridge reported them.
-async fn http(method: &'static str, url: String, body: Option<Value>) -> Result<Value, String> {
+async fn http(
+    method: &'static str,
+    url: String,
+    body: Option<Value>,
+    headers: Vec<(&'static str, String)>,
+) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
-        let request = ureq::request(method, &url).set("content-type", "application/json");
+        let mut request = ureq::request(method, &url).set("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.set(name, &value);
+        }
         let response = match body {
             Some(body) => request.send_json(body),
             None => request.call(),
@@ -172,14 +232,20 @@ async fn http(method: &'static str, url: String, body: Option<Value>) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+const MODEL_NOTE: &str = " Pass `model` with the model you are running as (for example claude-haiku-5-5), so the board history records who made the change.";
+const WORKSPACE_NOTE: &str = " `workspace` is optional and defaults to \"default\".";
+
 fn tool_definitions() -> Value {
     json!([
         {
             "name": "get_agent_context",
-            "description": "Get a compact summary of active Clankban work for planning or delegation.",
+            "description": format!("Get a compact summary of active work in one workspace for planning or delegation.{WORKSPACE_NOTE}"),
             "inputSchema": {
                 "type": "object",
-                "properties": { "status": { "type": "string", "description": "Optional status filter" } }
+                "properties": {
+                    "status": { "type": "string", "description": "Optional status filter" },
+                    "workspace": { "type": "string", "description": "Workspace id; defaults to \"default\"" }
+                }
             }
         },
         {
@@ -192,8 +258,17 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "get_task_history",
+            "description": "List the changes made to a work item, newest first, with who made each one (client and model), the fields that changed, and a summary.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "create_task",
-            "description": "Create an epic, task, subtask, or bug fix in the local board. Use status backlog, progress, review, or done, include parentId for child tasks, and include subtasks when known.",
+            "description": format!("Create an epic, task, subtask, or bug fix in the local board. Use status backlog, progress, review, or done, include parentId for child tasks, and include subtasks when known.{WORKSPACE_NOTE}{MODEL_NOTE}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -204,6 +279,8 @@ fn tool_definitions() -> Value {
                     "status": { "type": "string", "enum": ["backlog", "progress", "review", "done"] },
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
+                    "workspace": { "type": "string" },
+                    "model": { "type": "string" },
                     "subtasks": {
                         "type": "array",
                         "items": {
@@ -218,7 +295,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "update_task",
-            "description": "Update a local work item by ID, including its parent relationship.",
+            "description": format!("Update a local work item by ID, including its parent relationship and workspace.{MODEL_NOTE}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -228,9 +305,28 @@ fn tool_definitions() -> Value {
                     "priority": { "type": "string" },
                     "status": { "type": "string" },
                     "due": { "type": "string" },
-                    "parentId": { "type": "string" }
+                    "parentId": { "type": "string" },
+                    "workspace": { "type": "string", "description": "Move the task to this workspace" },
+                    "model": { "type": "string" }
                 },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "list_workspaces",
+            "description": "List the workspaces on this board, with how many tasks each holds.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "create_workspace",
+            "description": format!("Create a separate workspace for another project or area of work. The id is derived from the name.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "model": { "type": "string" }
+                },
+                "required": ["name"]
             }
         },
         {
@@ -255,7 +351,8 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "id": { "type": "integer" },
                     "status": { "type": "string", "enum": ["running", "done", "failed", "cancelled"] },
-                    "result": { "type": "string" }
+                    "result": { "type": "string" },
+                    "model": { "type": "string" }
                 },
                 "required": ["id", "status"]
             }
@@ -267,17 +364,43 @@ fn tool_definitions() -> Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tool_list_includes_run_request_tools() {
-        let tools = tool_definitions();
-        let names: Vec<&str> = tools
+    fn names() -> Vec<String> {
+        tool_definitions()
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"list_run_requests"));
-        assert!(names.contains(&"complete_run_request"));
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tool_list_includes_run_request_tools() {
+        let names = names();
+        assert!(names.iter().any(|n| n == "list_run_requests"));
+        assert!(names.iter().any(|n| n == "complete_run_request"));
+    }
+
+    #[test]
+    fn tool_list_includes_workspace_and_history_tools() {
+        let names = names();
+        for expected in ["list_workspaces", "create_workspace", "get_task_history"] {
+            assert!(names.iter().any(|n| n == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn model_is_taken_out_of_the_body_and_becomes_a_header() {
+        let mut args = json!({ "title": "x", "model": "claude-haiku-5-5" });
+        assert_eq!(take_model(&mut args), "claude-haiku-5-5");
+        assert!(args.get("model").is_none());
+        assert_eq!(args["title"], "x");
+    }
+
+    #[test]
+    fn client_name_includes_version_when_present() {
+        let params = json!({ "clientInfo": { "name": "claude-code", "version": "2.1.0" } });
+        assert_eq!(client_name(&params), "claude-code 2.1.0");
+        assert_eq!(client_name(&json!({})), "Agent");
     }
 
     #[test]

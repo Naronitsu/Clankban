@@ -37,6 +37,10 @@ let syncOk = !remoteMode;
 let skills = [];
 let runRequests = [];
 let agentFormsBuilt = false;
+let workspaces = [];
+let workspace = (() => {
+  try { return localStorage.getItem('clankban-workspace') || 'default'; } catch { return 'default'; }
+})();
 
 const $ = selector => document.querySelector(selector);
 const enc = encodeURIComponent;
@@ -44,7 +48,12 @@ const enc = encodeURIComponent;
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    headers: {
+      'content-type': 'application/json',
+      'x-clankban-actor': 'human',
+      'x-clankban-client': 'Board',
+      ...(options.headers || {}),
+    },
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json();
@@ -53,7 +62,9 @@ async function apiRequest(path, options = {}) {
 async function loadRemoteTasks() {
   if (!remoteMode) return;
   try {
-    const result = await apiRequest('/api/tasks');
+    await loadWorkspaces();
+    if (!workspaces.some(w => w.id === workspace)) setWorkspace('default', false);
+    const result = await apiRequest(`/api/tasks?workspace=${enc(workspace)}`);
     tasks = result.tasks;
     await Promise.all([loadRunRequests(), loadSkills()]);
     syncOk = true;
@@ -64,6 +75,114 @@ async function loadRemoteTasks() {
     console.warn('Clankban API unavailable during refresh.', error);
   }
   render();
+}
+
+// ---- workspaces ------------------------------------------------------------
+
+async function loadWorkspaces() {
+  const result = await apiRequest('/api/workspaces');
+  workspaces = result.workspaces;
+}
+
+function setWorkspace(id, reload = true) {
+  workspace = id;
+  try { localStorage.setItem('clankban-workspace', id); } catch { /* the choice is a convenience only */ }
+  if (reload) loadRemoteTasks();
+}
+
+function renderWorkspaceControls() {
+  const select = $('#workspaceSelect');
+  if (!select) return;
+  if (!remoteMode) {
+    select.innerHTML = '<option>Default (browser copy)</option>';
+    select.disabled = true;
+    $('#workspaceCrumb').textContent = 'Default';
+    $('#editWorkspace').disabled = true;
+    $('#newWorkspace').disabled = true;
+    return;
+  }
+  select.disabled = false;
+  $('#newWorkspace').disabled = false;
+  select.innerHTML = workspaces
+    .map(w => `<option value="${escapeHtml(w.id)}" ${w.id === workspace ? 'selected' : ''}>${escapeHtml(w.name)} · ${w.tasks}</option>`)
+    .join('');
+  const current = workspaces.find(w => w.id === workspace);
+  $('#workspaceCrumb').textContent = current ? current.name : 'Default';
+  $('#editWorkspace').disabled = !current;
+}
+
+function openWorkspaceModal(editing = false) {
+  const current = workspaces.find(w => w.id === workspace);
+  $('#workspaceModalTitle').textContent = editing ? 'Rename workspace' : 'New workspace';
+  $('#workspaceName').value = editing && current ? current.name : '';
+  $('#workspaceModal').dataset.mode = editing ? 'edit' : 'create';
+  const deletable = editing && current && current.id !== 'default' && current.tasks === 0;
+  $('#deleteWorkspace').hidden = !deletable;
+  $('#workspaceModalError').textContent = '';
+  $('#workspaceModal').classList.add('open');
+  $('#workspaceName').focus();
+}
+
+function closeWorkspaceModal() { $('#workspaceModal').classList.remove('open'); }
+
+async function saveWorkspace(event) {
+  event.preventDefault();
+  const name = $('#workspaceName').value.trim();
+  const editing = $('#workspaceModal').dataset.mode === 'edit';
+  try {
+    if (editing) {
+      const result = await apiRequest(`/api/workspaces/${enc(workspace)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+      workspaces = result.workspaces;
+    } else {
+      const created = await apiRequest('/api/workspaces', { method: 'POST', body: JSON.stringify({ name }) });
+      setWorkspace(created.id, false);
+    }
+    closeWorkspaceModal();
+    await loadRemoteTasks();
+  } catch (error) {
+    $('#workspaceModalError').textContent = error.message;
+  }
+}
+
+async function deleteWorkspace() {
+  if (!confirm('Delete this workspace? Only empty workspaces can be deleted.')) return;
+  try {
+    await apiRequest(`/api/workspaces/${enc(workspace)}`, { method: 'DELETE' });
+    closeWorkspaceModal();
+    setWorkspace('default', false);
+    await loadRemoteTasks();
+  } catch (error) {
+    $('#workspaceModalError').textContent = error.message;
+  }
+}
+
+// ---- change history --------------------------------------------------------
+
+async function loadHistory(id) {
+  const box = $('#drawerHistory');
+  if (!remoteMode) {
+    box.innerHTML = '<div class="history-empty">History is recorded by the desktop app.</div>';
+    return;
+  }
+  box.innerHTML = '<div class="history-empty">Loading…</div>';
+  try {
+    const result = await apiRequest(`/api/tasks/${enc(id)}/history`);
+    if (activeTaskId !== id) return;
+    box.innerHTML = result.history.length
+      ? result.history.map(h => `
+        <div class="history-entry">
+          <div class="history-who">
+            <strong>${escapeHtml(h.actorName)}</strong>
+            ${h.actorModel ? `<span class="history-model">${escapeHtml(h.actorModel)}</span>` : ''}
+            <span class="history-kind ${escapeHtml(h.actorKind)}">${escapeHtml(h.actorKind)}</span>
+          </div>
+          <div class="history-summary">${escapeHtml(h.summary)}</div>
+          <small>${formatDateTime(h.at)}</small>
+        </div>`).join('')
+      : '<div class="history-empty">No changes recorded yet.</div>';
+  } catch (error) {
+    box.innerHTML = '<div class="history-empty">Could not load history.</div>';
+  }
 }
 
 function escapeHtml(value = '') {
@@ -206,6 +325,7 @@ function updateSyncStatus() {
 }
 
 function render() {
+  renderWorkspaceControls();
   const list = visibleTasks();
   renderStats();
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
@@ -250,6 +370,7 @@ function openDrawer(id) {
   $('#drawerDescription').textContent = t.description || 'No description yet.';
   $('#drawerMeta').innerHTML = `<span class="meta-pill">${t.priority} priority</span><span class="meta-pill">${statusLabel[t.status] || t.status}</span><span class="meta-pill">Due ${formatDate(t.due)}</span>`;
   $('#drawerUpdated').textContent = formatDateTime(t.updated);
+  loadHistory(id);
   const done = all.filter(s => s.done).length;
   $('#subtaskCount').textContent = `${done} / ${all.length}`;
   $('#subtaskList').innerHTML = all.length
@@ -330,7 +451,7 @@ async function saveTask(event) {
       const saved = remoteMode ? await apiRequest(`/api/tasks/${enc(editingId)}`, { method: 'PATCH', body: JSON.stringify(data) }) : null;
       Object.assign(t, saved || data, { updated: new Date().toISOString() });
     } else if (remoteMode) {
-      tasks.push(await apiRequest('/api/tasks', { method: 'POST', body: JSON.stringify(data) }));
+      tasks.push(await apiRequest('/api/tasks', { method: 'POST', body: JSON.stringify({ ...data, workspace }) }));
     } else {
       tasks.push({ ...data, id: nextLocalId(), created: todayStr(), subtasks: [], parentId: null, updated: new Date().toISOString() });
     }
@@ -601,6 +722,7 @@ async function showAppVersion() {
 function isOpen(selector) { return document.querySelector(selector).classList.contains('open'); }
 
 function closeTop() {
+  if (isOpen('#workspaceModal')) return closeWorkspaceModal();
   if (isOpen('#paletteBackdrop')) return closePalette();
   if (isOpen('#helpBackdrop')) return closeHelp();
   if (isOpen('#jsonModalBackdrop')) return $('#jsonModalBackdrop').classList.remove('open');
@@ -658,6 +780,13 @@ $('#closeHelp').onclick = closeHelp;
 $('#helpBackdrop').onclick = e => { if (e.target.id === 'helpBackdrop') closeHelp(); };
 
 $('#refreshBoard').onclick = refreshNow;
+$('#workspaceSelect').onchange = e => setWorkspace(e.target.value);
+$('#newWorkspace').onclick = () => openWorkspaceModal(false);
+$('#editWorkspace').onclick = () => openWorkspaceModal(true);
+$('#workspaceForm').onsubmit = saveWorkspace;
+$('#closeWorkspaceModal').onclick = closeWorkspaceModal;
+$('#cancelWorkspace').onclick = closeWorkspaceModal;
+$('#deleteWorkspace').onclick = deleteWorkspace;
 
 document.addEventListener('submit', e => {
   if (e.target.matches('.skill-card')) {

@@ -14,7 +14,11 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">C</span><span>clankban</span><span class="brand-local">LOCAL</span></div>
-      <div class="workspace-switcher"><div class="workspace-icon">A</div><div><strong>Atlas workspace</strong><small>Local board</small></div></div>
+      <div class="workspace-switcher">
+        <label class="workspace-label" for="workspaceSelect">Workspace</label>
+        <select id="workspaceSelect" aria-label="Workspace"></select>
+        <div class="workspace-actions"><button class="button quiet" id="newWorkspace">＋ New</button><button class="button quiet" id="editWorkspace">Rename</button></div>
+      </div>
       <nav class="primary-nav" aria-label="Views">
         <button class="nav-item active" data-view="board"><span>▦</span> Board <span class="nav-count" id="navBoardCount">0</span></button>
         <button class="nav-item" data-view="list"><span>☰</span> List</button>
@@ -30,7 +34,7 @@
     </aside>
 
     <main class="main-content" id="board">
-      <header class="topbar"><div class="breadcrumbs"><span>Atlas workspace</span><b>/</b><strong id="viewTitle">Product board</strong></div><div class="top-actions"><button class="icon-button" id="refreshBoard" title="Refresh board (F5)">↻</button><button class="icon-button" id="focusSearch" title="Search (/)">⌕</button><button class="icon-button" id="openPalette" title="Command menu (Ctrl+K)">⌘K</button><button class="help-button" id="openHelp" title="Keyboard shortcuts (?)">?</button></div></header>
+      <header class="topbar"><div class="breadcrumbs"><span id="workspaceCrumb">Default</span><b>/</b><strong id="viewTitle">Product board</strong></div><div class="top-actions"><button class="icon-button" id="refreshBoard" title="Refresh board (F5)">↻</button><button class="icon-button" id="focusSearch" title="Search (/)">⌕</button><button class="icon-button" id="openPalette" title="Command menu (Ctrl+K)">⌘K</button><button class="help-button" id="openHelp" title="Keyboard shortcuts (?)">?</button></div></header>
       <section class="page-heading"><div><div class="eyebrow"><span class="live-dot"></span> LOCAL PROJECT</div><h1>Product board</h1><p>One visual source of truth for your work and your agents.</p></div><div class="heading-actions"><button class="button quiet" id="copyJson">↗ Copy agent JSON</button><button class="button primary" id="newTask">＋ New task</button></div></section>
 
       <section class="stats-row" aria-label="Board summary">
@@ -61,7 +65,7 @@
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
   <aside class="task-drawer" id="taskDrawer" aria-label="Task details">
     <div class="drawer-header"><span id="drawerType" class="type-badge task">TASK</span><button class="close-button" id="closeDrawer">×</button></div>
-    <div class="drawer-content"><div class="task-id" id="drawerId">AT-104</div><h2 id="drawerTitle">Task title</h2><p id="drawerDescription">Description</p><div class="drawer-meta" id="drawerMeta"></div><div class="drawer-section"><div class="section-heading"><span>Subtasks</span><span id="subtaskCount">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div></div><div class="drawer-section"><div class="section-heading">History</div><div class="activity-entry"><div class="mini-avatar purple">AI</div><div><strong>Last change</strong><p id="drawerUpdated">—</p></div></div></div></div>
+    <div class="drawer-content"><div class="task-id" id="drawerId">AT-104</div><h2 id="drawerTitle">Task title</h2><p id="drawerDescription">Description</p><div class="drawer-meta" id="drawerMeta"></div><div class="drawer-section"><div class="section-heading"><span>Subtasks</span><span id="subtaskCount">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div></div><div class="drawer-section"><div class="section-heading">History</div><p class="history-last">Last change: <span id="drawerUpdated">—</span></p><div id="drawerHistory" class="history-list"></div></div></div>
     <div class="drawer-footer"><button class="button danger quiet" id="deleteTask">Delete</button><button class="button quiet" id="editTask">Edit task</button></div>
   </aside>
 
@@ -79,6 +83,8 @@
     <tr><td><span class="kbd">Esc</span></td><td>Close the open panel</td></tr>
     <tr><td><span class="kbd">?</span></td><td>Show this list</td></tr>
   </tbody></table></div></div>
+
+  <div class="modal-backdrop" id="workspaceModal"><form class="task-modal workspace-modal" id="workspaceForm"><div class="modal-header"><div><span class="eyebrow">WORKSPACE</span><h2 id="workspaceModalTitle">New workspace</h2></div><button type="button" class="close-button" id="closeWorkspaceModal">×</button></div><p class="modal-note">Workspaces keep separate boards for separate projects. Each task belongs to one workspace, and agents can be pointed at a workspace.</p><label>Name<input id="workspaceName" name="name" required placeholder="e.g. Home renovation" /></label><p class="modal-error" id="workspaceModalError"></p><div class="modal-actions"><button type="button" class="button danger quiet" id="deleteWorkspace" hidden>Delete</button><button type="button" class="button quiet" id="cancelWorkspace">Cancel</button><button class="button primary" type="submit">Save</button></div></form></div>
 
   <script src="app.js"></script>
 </body>
