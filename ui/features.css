@@ -150,3 +150,9 @@ button.nav-item { background: none; border: 0; font: inherit; color: inherit; wi
 }
 .ws-rename:hover { color: #fff; text-decoration: underline; }
 .ws-rename:disabled { opacity: 0.4; cursor: default; }
+
+/* Layout: the sidebar always fills the window. Only the main area scrolls. */
+html, body { height: 100%; }
+.app-shell { height: 100vh; min-height: 0; overflow: hidden; }
+.sidebar { height: 100%; min-height: 0; overflow-y: auto; }
+.main-content { height: 100%; min-height: 0; overflow-y: auto; }
