@@ -114,3 +114,39 @@ button.nav-item { background: none; border: 0; font: inherit; color: inherit; wi
 
 /* Inputs inside themed panels take the panel's colour, so they work in light and dark. */
 .search-box input, .palette input, .filter-panel select { background: transparent; color: inherit; }
+
+/* Workspace picker: a button that opens a small menu, instead of a native dropdown. */
+.ws-picker { position: relative; width: 100%; }
+.ws-button {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; border-radius: 12px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.08); color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.14); font: inherit; text-align: left;
+}
+.ws-button:hover { background: rgba(255, 255, 255, 0.14); }
+.ws-button:disabled { opacity: 0.6; cursor: default; }
+.ws-dot { width: 9px; height: 9px; border-radius: 50%; background: linear-gradient(135deg, #ff6f91, #ffab2e); flex: none; }
+.ws-name { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-count { font-size: 11px; opacity: 0.7; }
+.ws-caret { font-size: 11px; opacity: 0.7; }
+.ws-menu {
+  position: absolute; left: 0; right: 0; top: calc(100% + 8px); z-index: 30;
+  padding: 6px; border-radius: 14px; background: #2a1f52;
+  border: 1px solid rgba(255, 255, 255, 0.12); box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
+}
+.ws-menu[hidden] { display: none; }
+.ws-item {
+  width: 100%; display: flex; justify-content: space-between; align-items: center;
+  padding: 9px 10px; border-radius: 10px; border: 0; background: transparent;
+  color: #e9e3ff; font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+}
+.ws-item:hover { background: rgba(255, 255, 255, 0.1); }
+.ws-item.active { background: rgba(255, 111, 145, 0.22); color: #fff; font-weight: 600; }
+.ws-item-count { font-size: 11px; opacity: 0.6; }
+.ws-item.ws-new { margin-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.1); border-radius: 0 0 10px 10px; color: #ffb3c6; }
+.ws-rename {
+  margin-top: 6px; background: transparent; border: 0; color: #cbc3ea;
+  font: inherit; font-size: 12px; cursor: pointer; padding: 2px 4px;
+}
+.ws-rename:hover { color: #fff; text-decoration: underline; }
+.ws-rename:disabled { opacity: 0.4; cursor: default; }

@@ -1,0 +1,44 @@
+/* Hand-tuned dark palette for the whimsical theme. Loaded last, after theme-dark.css,
+   so these values win over the generated dark twins. */
+
+:root[data-theme="dark"] {
+  --bg: #161129;
+  --surface: #211a3b;
+  --ink: #f3eeff;
+  --muted: #a79bd0;
+  --line: #3a2e5e;
+  --purple: #a48bff;
+  --purple-soft: #2b2250;
+  --coral: #ff86a5;
+  --green: #4fe0b8;
+  --orange: #ffc160;
+  --blue: #6cc0ff;
+  --shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
+  --glow-1: rgba(255, 111, 145, 0.16);
+  --glow-2: rgba(31, 200, 160, 0.12);
+}
+
+[data-theme="dark"] .sidebar {
+  background: linear-gradient(180deg, #2a1c52 0%, #140d2e 100%);
+}
+
+[data-theme="dark"] .task-card,
+[data-theme="dark"] .stat-card,
+[data-theme="dark"] .task-drawer,
+[data-theme="dark"] .task-modal,
+[data-theme="dark"] .json-modal,
+[data-theme="dark"] .ws-menu {
+  background: var(--surface);
+}
+
+[data-theme="dark"] .search-box,
+[data-theme="dark"] .sort-select,
+[data-theme="dark"] .filter-button {
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+[data-theme="dark"] .button.primary {
+  background: linear-gradient(135deg, #a48bff, #ff86a5);
+  box-shadow: 0 8px 20px rgba(164, 139, 255, 0.25);
+}

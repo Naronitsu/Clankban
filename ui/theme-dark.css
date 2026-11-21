@@ -113,3 +113,22 @@
 [data-theme="dark"] .history-kind { background: rgba(255, 255, 255, 0.08); }
 [data-theme="dark"] .history-kind.agent { background: rgba(110, 86, 207, 0.18); }
 [data-theme="dark"] .history-kind.human { background: rgba(40, 170, 90, 0.16); }
+[data-theme="dark"] .ws-button { background: rgba(26, 26, 26, 0.08); color: #fff; border: 1px solid rgba(51, 51, 51, 0.14); }
+[data-theme="dark"] .ws-button:hover { background: rgba(26, 26, 26, 0.14); }
+[data-theme="dark"] .ws-dot { background: linear-gradient(135deg, #650018, #ffab2e); }
+[data-theme="dark"] .ws-menu { background: #2a1f52; border: 1px solid rgba(51, 51, 51, 0.12); }
+[data-theme="dark"] .ws-item { color: #e9e3ff; }
+[data-theme="dark"] .ws-item:hover { background: rgba(26, 26, 26, 0.1); }
+[data-theme="dark"] .ws-item.active { background: rgba(101, 0, 24, 0.22); color: #fff; }
+[data-theme="dark"] .ws-item.ws-new { border-top: 1px solid rgba(51, 51, 51, 0.1); color: #ffb3c6; }
+[data-theme="dark"] .ws-rename { color: #cbc3ea; }
+[data-theme="dark"] .ws-rename:hover { color: #fff; }
+:root[data-theme="dark"] { --bg: #3c2100; --surface: #1a1a1a; --ink: #c3b5e2; --muted: #8e82a6; --line: #6a4720; --purple-soft: #0e003a; }
+[data-theme="dark"] .sidebar { background: linear-gradient(180deg, #34205f 0%, #1e1441 100%); }
+[data-theme="dark"] .brand-mark { background: linear-gradient(135deg, #650018, #15006c); }
+[data-theme="dark"] .nav-item:hover, [data-theme="dark"] .nav-item.active { background: rgba(26, 26, 26, 0.14); }
+[data-theme="dark"] .button.primary { background: linear-gradient(135deg, #15006c, #650018); }
+[data-theme="dark"] .type-badge.epic { background: #001a3d; color: #4581e2; }
+[data-theme="dark"] .type-badge.bug { background: #3c0012; color: #d25679; }
+[data-theme="dark"] .type-badge.task { background: #0e003a; color: #6b52d6; }
+[data-theme="dark"] .type-badge.subtask { background: #09372a; color: #7bedd3; }

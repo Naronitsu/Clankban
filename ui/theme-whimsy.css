@@ -1,0 +1,79 @@
+/* Whimsical palette: cream paper, candy accents, soft gradients, rounder shapes.
+   Loaded after styles.css and features.css. The dark theme is generated from these rules
+   by scripts/gen-dark-theme.js, so change the colours here and regenerate. */
+
+:root {
+  --bg: #fff4e6;
+  --surface: #ffffff;
+  --ink: #2b1d4a;
+  --muted: #7d6f98;
+  --line: #f1e2d1;
+  --purple: #7c5cff;
+  --purple-soft: #efeaff;
+  --coral: #ff6f91;
+  --green: #1fc8a0;
+  --orange: #ffab2e;
+  --blue: #3fa9ff;
+  --shadow: 0 14px 34px rgba(124, 92, 255, 0.12);
+  --glow-1: rgba(255, 111, 145, 0.22);
+  --glow-2: rgba(31, 200, 160, 0.2);
+}
+
+body {
+  background:
+    radial-gradient(circle at 12% 0%, var(--glow-1) 0, transparent 38%),
+    radial-gradient(circle at 100% 100%, var(--glow-2) 0, transparent 42%),
+    var(--bg);
+}
+
+.sidebar {
+  background: linear-gradient(180deg, #34205f 0%, #1e1441 100%);
+}
+
+.brand-mark {
+  background: linear-gradient(135deg, #ff6f91, #7c5cff);
+  border-radius: 12px;
+}
+
+.nav-item:hover,
+.nav-item.active {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.button.primary {
+  background: linear-gradient(135deg, #7c5cff, #ff6f91);
+  border-color: transparent;
+  box-shadow: 0 8px 20px rgba(124, 92, 255, 0.28);
+}
+
+.stat-card {
+  border-radius: 18px;
+  border-top: 4px solid transparent;
+}
+.stat-card:nth-child(1) { border-top-color: var(--purple); }
+.stat-card:nth-child(2) { border-top-color: var(--orange); }
+.stat-card:nth-child(3) { border-top-color: var(--green); }
+.stat-card:nth-child(4) { border-top-color: var(--coral); }
+
+.task-card {
+  border-radius: 16px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.task-card:hover {
+  transform: translateY(-2px) rotate(-0.3deg);
+  box-shadow: 0 12px 24px rgba(124, 92, 255, 0.14);
+}
+
+.board-column:nth-child(1) .column-heading::before { content: "●"; color: var(--orange); margin-right: 6px; }
+.board-column:nth-child(2) .column-heading::before { content: "●"; color: var(--blue); margin-right: 6px; }
+.board-column:nth-child(3) .column-heading::before { content: "●"; color: var(--purple); margin-right: 6px; }
+.board-column:nth-child(4) .column-heading::before { content: "●"; color: var(--green); margin-right: 6px; }
+
+.type-badge.epic { background: #e3efff; color: #1f5fc9; }
+.type-badge.bug { background: #ffe4ec; color: #c2345c; }
+.type-badge.task { background: #efeaff; color: #5b3fd1; }
+.type-badge.subtask { background: #e0faf3; color: #12846a; }
+
+.priority.high { background: var(--coral); }
+.priority.medium { background: var(--orange); }
+.priority.low { background: var(--green); }

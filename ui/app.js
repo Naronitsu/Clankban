@@ -91,24 +91,38 @@ function setWorkspace(id, reload = true) {
 }
 
 function renderWorkspaceControls() {
-  const select = $('#workspaceSelect');
-  if (!select) return;
+  const button = $('#workspaceButton');
+  if (!button) return;
   if (!remoteMode) {
-    select.innerHTML = '<option>Default (browser copy)</option>';
-    select.disabled = true;
-    $('#workspaceCrumb').textContent = 'Default';
+    $('#workspaceName').textContent = 'Default';
+    $('#workspaceCount').textContent = 'browser copy';
+    button.disabled = true;
     $('#editWorkspace').disabled = true;
-    $('#newWorkspace').disabled = true;
+    closeWorkspaceMenu();
     return;
   }
-  select.disabled = false;
-  $('#newWorkspace').disabled = false;
-  select.innerHTML = workspaces
-    .map(w => `<option value="${escapeHtml(w.id)}" ${w.id === workspace ? 'selected' : ''}>${escapeHtml(w.name)} · ${w.tasks}</option>`)
-    .join('');
+  button.disabled = false;
+  $('#editWorkspace').disabled = false;
   const current = workspaces.find(w => w.id === workspace);
-  $('#workspaceCrumb').textContent = current ? current.name : 'Default';
-  $('#editWorkspace').disabled = !current;
+  $('#workspaceName').textContent = current ? current.name : 'Default';
+  $('#workspaceCount').textContent = current ? String(current.tasks) : '';
+  $('#workspaceMenu').innerHTML = workspaces
+    .map(w => `<button class="ws-item ${w.id === workspace ? 'active' : ''}" role="option" data-workspace="${escapeHtml(w.id)}">
+        <span class="ws-item-name">${escapeHtml(w.name)}</span><span class="ws-item-count">${w.tasks}</span>
+      </button>`)
+    .join('') + '<button class="ws-item ws-new" data-new-workspace>＋ New workspace</button>';
+}
+
+function openWorkspaceMenu() {
+  renderWorkspaceControls();
+  $('#workspaceMenu').hidden = false;
+  $('#workspaceButton').setAttribute('aria-expanded', 'true');
+}
+
+function closeWorkspaceMenu() {
+  const menu = $('#workspaceMenu');
+  if (menu) menu.hidden = true;
+  $('#workspaceButton')?.setAttribute('aria-expanded', 'false');
 }
 
 function openWorkspaceModal(editing = false) {
@@ -802,8 +816,22 @@ $('#closeHelp').onclick = closeHelp;
 $('#helpBackdrop').onclick = e => { if (e.target.id === 'helpBackdrop') closeHelp(); };
 
 $('#refreshBoard').onclick = refreshNow;
-$('#workspaceSelect').onchange = e => setWorkspace(e.target.value);
-$('#newWorkspace').onclick = () => openWorkspaceModal(false);
+$('#workspaceButton').onclick = () => ($('#workspaceMenu').hidden ? openWorkspaceMenu() : closeWorkspaceMenu());
+$('#workspaceMenu').onclick = e => {
+  if (e.target.closest('[data-new-workspace]')) {
+    closeWorkspaceMenu();
+    openWorkspaceModal(false);
+    return;
+  }
+  const item = e.target.closest('[data-workspace]');
+  if (item) {
+    closeWorkspaceMenu();
+    setWorkspace(item.dataset.workspace);
+  }
+};
+document.addEventListener('click', e => {
+  if (!e.target.closest('.ws-picker')) closeWorkspaceMenu();
+});
 $('#editWorkspace').onclick = () => openWorkspaceModal(true);
 $('#workspaceForm').onsubmit = saveWorkspace;
 $('#closeWorkspaceModal').onclick = closeWorkspaceModal;

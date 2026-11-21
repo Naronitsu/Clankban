@@ -9,7 +9,9 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="features.css" />
+  <link rel="stylesheet" href="theme-whimsy.css" />
   <link rel="stylesheet" href="theme-dark.css" />
+  <link rel="stylesheet" href="theme-dark-whimsy.css" />
   <script>
     // Set the theme before the first paint: a saved choice wins, otherwise follow Windows.
     (function () {
@@ -25,9 +27,16 @@
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">C</span><span>clankban</span><span class="brand-local">LOCAL</span></div>
       <div class="workspace-switcher">
-        <label class="workspace-label" for="workspaceSelect">Workspace</label>
-        <select id="workspaceSelect" aria-label="Workspace"></select>
-        <div class="workspace-actions"><button class="button quiet" id="newWorkspace">＋ New</button><button class="button quiet" id="editWorkspace">Rename</button></div>
+        <div class="ws-picker">
+          <button class="ws-button" id="workspaceButton" aria-haspopup="listbox" aria-expanded="false" title="Switch workspace">
+            <span class="ws-dot" aria-hidden="true"></span>
+            <span class="ws-name" id="workspaceName">Default</span>
+            <span class="ws-count" id="workspaceCount"></span>
+            <span class="ws-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="ws-menu" id="workspaceMenu" role="listbox" hidden></div>
+        </div>
+        <div class="workspace-actions"><button class="ws-rename" id="editWorkspace" title="Rename this workspace">Rename</button></div>
       </div>
       <nav class="primary-nav" aria-label="Views">
         <button class="nav-item active" data-view="board"><span>▦</span> Board <span class="nav-count" id="navBoardCount">0</span></button>

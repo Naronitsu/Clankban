@@ -11,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 
 const uiDir = path.join(__dirname, "..", "ui");
-const sources = ["styles.css", "features.css"];
+const sources = ["styles.css", "features.css", "theme-whimsy.css"];
 
 function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, "");
