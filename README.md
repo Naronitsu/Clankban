@@ -69,6 +69,7 @@ The **Agent runs** view sends a skill to a connected agent. Clicking **Send to a
 - Board with Backlog, In progress, In review, and Done columns, plus List and Recent views.
 - Epics, tasks, subtasks, and bug fixes with stable `AT-###` identifiers, and parent-child links.
 - Create, edit, inspect, delete, search, filter, sort, and tick off subtasks.
+- Light and dark themes. The default follows Windows, and the sidebar button switches and remembers your choice in `%APPDATA%\clankban\settings.json`.
 - Command menu (Ctrl+K), keyboard shortcuts, and a "Copy agent JSON" snapshot.
 - Agent runs view and the request queue.
 - Local SQLite persistence, a loopback API at `127.0.0.1`, and the MCP bridge.

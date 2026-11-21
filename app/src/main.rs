@@ -5,6 +5,7 @@ mod api;
 mod gui;
 mod mcp;
 mod presenter;
+mod settings;
 mod skills;
 mod store;
 mod updater;
@@ -58,7 +59,7 @@ fn exit_on_error(result: Result<(), String>, what: &str) {
 fn run_gui() -> Result<(), String> {
     let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
     let api = start_api_background(store.clone(), api_port());
-    gui::run(store, api).map_err(|e| e.to_string())
+    gui::run(store, api, data_dir()).map_err(|e| e.to_string())
 }
 
 /// Serves the agent API on a background thread. Returns the URL, or why it could not start

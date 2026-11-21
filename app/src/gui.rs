@@ -2,6 +2,7 @@
 //! `Store` the agent API and MCP bridge use, so every change is shared.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use serde_json::{json, Map, Value};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 use crate::presenter::{self, Filter};
+use crate::settings::{self, Settings, ThemeChoice};
 use crate::skills;
 use crate::store::{ApiError, RunRequest, Store, Task};
 
@@ -61,6 +63,9 @@ struct State {
     skill_values: HashMap<String, String>,
     palette_cmds: Vec<Cmd>,
     signature: String,
+    data_dir: PathBuf,
+    settings: Settings,
+    dark: bool,
 }
 
 struct Ctx {
@@ -430,6 +435,13 @@ fn run_command(ui: &AppWindow, st: &mut State, cmd: Cmd) {
     refresh(ui, st, true);
 }
 
+/// Switches the whole window between the light and dark palettes.
+fn apply_theme(ui: &AppWindow, dark: bool) {
+    ui.global::<Theme>().set_dark(dark);
+    ui.global::<Palette>().set_color_scheme(if dark { slint::language::ColorScheme::Dark } else { slint::language::ColorScheme::Light });
+    ui.set_theme_button(if dark { "Light mode" } else { "Dark mode" }.into());
+}
+
 fn clear_filters(ui: &AppWindow, st: &mut State) {
     st.filter.priority.clear();
     st.filter.kind.clear();
@@ -439,8 +451,11 @@ fn clear_filters(ui: &AppWindow, st: &mut State) {
     ui.set_filter_status("".into());
 }
 
-pub fn run(store: Arc<Store>, api: Result<String, String>) -> Result<(), slint::PlatformError> {
+pub fn run(store: Arc<Store>, api: Result<String, String>, data_dir: PathBuf) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    let loaded = settings::load(&data_dir);
+    let dark = settings::resolve_dark(loaded.theme, settings::system_prefers_dark());
+    apply_theme(&ui, dark);
     ui.set_sort("Priority".into());
     ui.set_version_text(env!("CARGO_PKG_VERSION").into());
     match &api {
@@ -465,6 +480,9 @@ pub fn run(store: Arc<Store>, api: Result<String, String>) -> Result<(), slint::
         editing: None,
         skill_values: HashMap::new(),
         palette_cmds: Vec::new(),
+        data_dir,
+        settings: loaded,
+        dark,
         signature: String::new(),
     }));
     refresh(&ui, &mut st.borrow_mut(), true);
@@ -599,6 +617,14 @@ fn register(ui: &AppWindow, st: &Rc<RefCell<State>>) {
         } else if action == "install-update" {
             crate::updater::install(&ui);
         }
+    });
+    on!(on_toggle_theme, |ui, st| {
+        st.settings.theme = if st.dark { ThemeChoice::Light } else { ThemeChoice::Dark };
+        if let Err(e) = settings::save(&st.data_dir, &st.settings) {
+            ui.set_notice(format!("Could not save the theme: {e}").into());
+        }
+        st.dark = !st.dark;
+        apply_theme(&ui, st.dark);
     });
     on!(on_check_updates, |ui, st| {
         crate::updater::check(&ui);
