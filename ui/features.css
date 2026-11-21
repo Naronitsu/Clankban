@@ -90,6 +90,9 @@ button.nav-item { background: none; border: 0; font: inherit; color: inherit; wi
 .update-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .update-actions .button { font-size: 12px; padding: 6px 10px; }
 
+/* Theme toggle in the sidebar */
+.theme-toggle { width: 100%; margin: 0 0 10px; }
+
 /* Workspaces and change history */
 .workspace-switcher { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; }
 .workspace-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; }
@@ -108,3 +111,6 @@ button.nav-item { background: none; border: 0; font: inherit; color: inherit; wi
 .history-kind.human { background: rgba(40, 170, 90, 0.16); }
 .history-summary { font-size: 13px; margin: 4px 0; }
 .history-entry small, .history-empty { font-size: 12px; opacity: 0.65; }
+
+/* Inputs inside themed panels take the panel's colour, so they work in light and dark. */
+.search-box input, .palette input, .filter-panel select { background: transparent; color: inherit; }

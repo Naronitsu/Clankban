@@ -722,6 +722,23 @@ async function showAppVersion() {
   }
 }
 
+// ---- theme -----------------------------------------------------------------
+// The stylesheet's dark twin (theme-dark.css) applies under html[data-theme="dark"].
+// The first paint uses the saved choice or the Windows setting (see index.html).
+
+function currentTheme() { return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'; }
+
+function updateThemeButton() {
+  $('#themeToggle').textContent = currentTheme() === 'dark' ? 'Light mode' : 'Dark mode';
+}
+
+function toggleTheme() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('clankban-theme', next); } catch { /* the choice is a convenience only */ }
+  updateThemeButton();
+}
+
 // ---- wiring ----------------------------------------------------------------
 
 function isOpen(selector) { return document.querySelector(selector).classList.contains('open'); }
@@ -827,6 +844,8 @@ document.addEventListener('keydown', e => {
 });
 
 $('#checkUpdates').onclick = () => checkForUpdates();
+$('#themeToggle').onclick = toggleTheme;
+updateThemeButton();
 $('#installUpdate').onclick = installUpdate;
 
 render();

@@ -9,6 +9,16 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="features.css" />
+  <link rel="stylesheet" href="theme-dark.css" />
+  <script>
+    // Set the theme before the first paint: a saved choice wins, otherwise follow Windows.
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('clankban-theme'); } catch (e) { /* storage blocked */ }
+      var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
 </head>
 <body>
   <div class="app-shell">
@@ -27,6 +37,7 @@
       </nav>
       <div class="sidebar-spacer"></div>
       <div class="agent-status"><span class="status-dot" id="syncDot"></span><div><strong id="syncStatus">Connecting…</strong><small id="syncDetail"></small></div></div>
+      <button class="button quiet theme-toggle" id="themeToggle">Dark mode</button>
       <div class="update-panel">
         <small>Version <span id="appVersion">—</span> · <span id="updateStatus"></span></small>
         <div class="update-actions"><button class="button quiet" id="checkUpdates">Check for updates</button><button class="button primary" id="installUpdate" hidden>Install update</button></div>
