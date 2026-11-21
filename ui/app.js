@@ -101,7 +101,8 @@ function renderWorkspaceControls() {
   const button = $('#workspaceButton');
   if (!button) return;
   if (!remoteMode) {
-    $('#workspaceName').textContent = 'Default';
+    $('#workspacePickerName').textContent = 'Default';
+    $('#workspaceCrumb').textContent = 'Default';
     $('#workspaceCount').textContent = 'browser copy';
     button.disabled = true;
     $('#editWorkspace').disabled = true;
@@ -111,7 +112,8 @@ function renderWorkspaceControls() {
   button.disabled = false;
   $('#editWorkspace').disabled = false;
   const current = workspaces.find(w => w.id === workspace);
-  $('#workspaceName').textContent = current ? current.name : 'Default';
+  $('#workspacePickerName').textContent = current ? current.name : 'Default';
+  $('#workspaceCrumb').textContent = current ? current.name : 'Default';
   $('#workspaceCount').textContent = current ? String(current.tasks) : '';
   $('#workspaceMenu').innerHTML = workspaces
     .map(w => `<button class="ws-item ${w.id === workspace ? 'active' : ''}" role="option" data-workspace="${escapeHtml(w.id)}">
