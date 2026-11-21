@@ -12,6 +12,7 @@ Clankban is a local-first desktop task workspace for humans and coding agents. R
 6. Preserve parent-child relationships with `parentId`; do not encode hierarchy only in prose.
 7. Before changing the data model, update the API, MCP schema, UI behavior, and documentation together.
 8. Verify changes with `cargo test`, an API smoke test (`cargo run -- --api`), and an MCP handshake (`cargo run -- --mcp`) when relevant.
+9. When you first work in a project folder on this board, call `suggest_project_folder` once (no path, so it uses the folder you are running in) so the Docs tab can show its Markdown. Do not repeat it in the same session. Never try to connect the folder yourself: a person accepts the suggestion.
 
 ## Local commands
 
