@@ -36,7 +36,10 @@ let lastSync = null;
 let syncOk = !remoteMode;
 let skills = [];
 let runRequests = [];
-let agentFormsBuilt = false;
+let agentShellBuilt = false;
+let selectedSkill = '';
+let formSkill = '';
+const agentDrafts = {};
 let workspaces = [];
 let projectDocs = null;
 let selectedDoc = null;
@@ -611,54 +614,108 @@ function runStatusLabel(status) {
   return { pending: 'Pending', running: 'Running', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' }[status] || status;
 }
 
-// Forms are built once so text typed into them survives the five-second refresh.
-function renderAgentForms() {
-  if (agentFormsBuilt || !skills.length) return;
+// The page has a skill list, one form for the chosen skill, and the request queue below.
+// The form is rebuilt only when the chosen skill changes; typed text is kept per skill in
+// agentDrafts, so the five-second refresh never wipes what someone is writing.
+
+function skillTitle(name) {
+  return name.replace(/_/g, ' ');
+}
+
+function buildAgentShell() {
   $('#agentView').innerHTML = `
-    <div class="agent-intro"><p>Send a skill to the connected agent. It reads the request through the MCP bridge, shows its plan, and waits for your approval before changing anything.</p></div>
-    <div class="skill-grid">${skills.map(skill => `
-      <form class="skill-card" data-skill="${escapeHtml(skill.name)}">
-        <h3>${escapeHtml(skill.name.replace(/_/g, ' '))}</h3>
-        <p>${escapeHtml(skill.description)}</p>
-        ${skill.arguments.map(arg => `
-          <label>${escapeHtml(arg.name)}${arg.required ? ' (required)' : ''}
-            <textarea name="${escapeHtml(arg.name)}" rows="3" placeholder="${escapeHtml(arg.description)}"></textarea>
-          </label>`).join('')}
-        <div class="skill-actions"><button class="button primary" type="submit">Send to agent</button></div>
-      </form>`).join('')}
+    <p class="agent-intro">Choose a skill, fill in what it asks for, and send it. The connected agent reads the request through the MCP bridge and shows its plan before it changes anything.</p>
+    <div class="agent-layout">
+      <div class="skill-list" id="skillList" role="group" aria-label="Skills"></div>
+      <form class="skill-form" id="skillForm" autocomplete="off"></form>
     </div>
-    <div class="section-heading run-heading"><span>Requests</span><span id="runCount"></span></div>
-    <div id="runList"></div>`;
-  agentFormsBuilt = true;
+    <section class="run-section">
+      <div class="section-heading"><span>Requests</span><span id="runCount"></span></div>
+      <div class="run-list" id="runList"></div>
+    </section>`;
+  agentShellBuilt = true;
+}
+
+function renderSkillList() {
+  const list = $('#skillList');
+  if (!list) return;
+  list.innerHTML = skills.map(skill => `
+    <button type="button" class="skill-option${skill.name === selectedSkill ? ' active' : ''}" data-skill="${escapeHtml(skill.name)}" aria-pressed="${skill.name === selectedSkill}">
+      <strong>${escapeHtml(skillTitle(skill.name))}</strong>
+      <small>${escapeHtml(skill.description)}</small>
+    </button>`).join('');
+}
+
+function renderSkillForm(force = false) {
+  const form = $('#skillForm');
+  const skill = skills.find(s => s.name === selectedSkill);
+  if (!form) return;
+  if (!skill) {
+    form.innerHTML = '';
+    formSkill = '';
+    return;
+  }
+  if (formSkill === skill.name && !force) return;
+  formSkill = skill.name;
+  const draft = agentDrafts[skill.name] || {};
+  const fields = skill.arguments.length
+    ? skill.arguments.map(arg => `
+        <label class="skill-field">
+          <span>${escapeHtml(arg.name)} ${arg.required ? '<em class="arg-tag required">required</em>' : '<em class="arg-tag">optional</em>'}</span>
+          <textarea name="${escapeHtml(arg.name)}" rows="3" placeholder="${escapeHtml(arg.description)}">${escapeHtml(draft[arg.name] || '')}</textarea>
+        </label>`).join('')
+    : '<p class="no-args">This skill needs no details. The agent reads what it needs from the board.</p>';
+  form.dataset.skill = skill.name;
+  form.innerHTML = `
+    <div class="skill-form-head">
+      <h2>${escapeHtml(skillTitle(skill.name))}</h2>
+      <p>${escapeHtml(skill.description)}</p>
+    </div>
+    ${fields}
+    <div class="skill-form-footer">
+      <button class="button primary" type="submit">Send to agent</button>
+    </div>`;
+}
+
+function selectSkill(name) {
+  selectedSkill = name;
+  renderSkillList();
+  renderSkillForm(true);
 }
 
 function renderRunList() {
   const list = $('#runList');
   if (!list) return;
   const active = runRequests.filter(r => r.status === 'pending' || r.status === 'running').length;
-  $('#runCount').textContent = `${active} active`;
+  $('#runCount').textContent = active ? `${active} active` : '';
   const newestFirst = [...runRequests].reverse();
   list.innerHTML = newestFirst.length
     ? newestFirst.map(run => `
       <div class="run-row">
-        <div class="run-main">
-          <strong>#${run.id} ${escapeHtml(run.skill.replace(/_/g, ' '))}</strong>
+        <div class="run-info">
+          <span class="run-title">${escapeHtml(skillTitle(run.skill))}</span>
+          <span class="run-meta">#${run.id} · ${relativeTime(run.created)}</span>
+        </div>
+        <div class="run-side">
           <span class="run-status ${run.status}">${runStatusLabel(run.status)}</span>
-          <small>${relativeTime(run.created)}</small>
+          ${run.status === 'pending' ? `<button class="button quiet cancel-run" data-id="${run.id}">Cancel</button>` : ''}
         </div>
         ${run.result ? `<p class="run-result">${escapeHtml(run.result)}</p>` : ''}
-        ${run.status === 'pending' ? `<button class="button quiet cancel-run" data-id="${run.id}">Cancel</button>` : ''}
       </div>`).join('')
-    : '<div class="empty-note">No requests yet. Send a skill above.</div>';
+    : '<div class="empty-note">No requests yet. Pick a skill above to send one.</div>';
 }
 
 function renderAgent() {
   if (!remoteMode) {
     $('#agentView').innerHTML = '<div class="empty-note">Agent runs need the desktop app and its local API. Open the installed Clankban to send skills to an agent.</div>';
-    agentFormsBuilt = false;
+    agentShellBuilt = false;
+    formSkill = '';
     return;
   }
-  renderAgentForms();
+  if (!agentShellBuilt) buildAgentShell();
+  if (!skills.some(s => s.name === selectedSkill)) selectedSkill = skills[0]?.name || '';
+  renderSkillList();
+  renderSkillForm();
   renderRunList();
 }
 
@@ -677,7 +734,8 @@ async function sendRun(form) {
   }
   try {
     await apiRequest('/api/run-requests', { method: 'POST', body: JSON.stringify({ skill: skill.name, arguments: args }) });
-    form.reset();
+    form.querySelectorAll('textarea').forEach(t => { t.value = ''; });
+    delete agentDrafts[skill.name];
     await loadRunRequests();
     render();
   } catch (error) {
@@ -756,7 +814,7 @@ async function showAppVersion() {
 }
 
 // ---- theme -----------------------------------------------------------------
-// The stylesheet's dark twin (theme-dark.css) applies under html[data-theme="dark"].
+// Colours come from the tokens in theme.css, which switch under html[data-theme="dark"].
 // The first paint uses the saved choice or the Windows setting (see index.html).
 
 function currentTheme() { return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'; }
@@ -1114,13 +1172,22 @@ $('#cancelWorkspace').onclick = closeWorkspaceModal;
 $('#deleteWorkspace').onclick = deleteWorkspace;
 
 document.addEventListener('submit', e => {
-  if (e.target.matches('.skill-card')) {
+  if (e.target.matches('#skillForm')) {
     e.preventDefault();
     sendRun(e.target);
   }
 });
 
+document.addEventListener('input', e => {
+  const form = e.target.closest?.('#skillForm');
+  if (!form || !form.dataset.skill || !e.target.name) return;
+  const draft = agentDrafts[form.dataset.skill] || (agentDrafts[form.dataset.skill] = {});
+  draft[e.target.name] = e.target.value;
+});
+
 document.addEventListener('click', e => {
+  const skillOption = e.target.closest('.skill-option');
+  if (skillOption) return selectSkill(skillOption.dataset.skill);
   const cancelButton = e.target.closest('.cancel-run');
   if (cancelButton) return cancelRun(Number(cancelButton.dataset.id));
   const menuButton = e.target.closest('.column-menu');
