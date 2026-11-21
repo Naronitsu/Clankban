@@ -548,31 +548,37 @@ async function loadViews() {
 
 // The Views button shows the open view's name, or "Views". Its menu lists the board's views, and
 // offers creating a view, plus updating or deleting the open one.
+// Views: a saved board or list with its filters. The Views item always says "Views". Its arrow opens
+// the list in the sidebar, where choosing a view keeps it open and selected. Clicking the name opens
+// the Views window, to open, update, rename or delete views. Save as view sits in the filter bar.
+
 function renderViewPicker() {
   const button = $('#viewsButton');
   if (!button) return;
   if (activeCustomView && !customViews.some(v => v.id === activeCustomView)) activeCustomView = null;
-  const current = customViews.find(v => v.id === activeCustomView);
-  button.innerHTML = `<span>❖</span> ${escapeHtml(current ? current.name : 'Views')} <span class="views-caret">▾</span>`;
+  button.innerHTML = '<span>❖</span> Views';
   if (!$('#viewsMenu').hidden) renderViewsMenu();
+  if ($('#viewsWindowBackdrop').classList.contains('open')) renderViewsWindow();
+}
+
+function viewItemHtml(v) {
+  const selected = v.id === activeCustomView ? ' active' : '';
+  return `<button type="button" class="nav-item views-item${selected}" data-view-id="${v.id}" title="${escapeHtml(v.name)}"><span class="view-name">${escapeHtml(v.name)}</span></button>`;
 }
 
 function renderViewsMenu() {
-  const current = customViews.find(v => v.id === activeCustomView);
-  const list = customViews.length
-    ? customViews.map(v => `<button type="button" class="ws-item${v.id === activeCustomView ? ' active' : ''}" data-view-id="${v.id}"><span>${escapeHtml(v.name)}</span><small>${v.layout === 'list' ? 'List' : 'Board'}</small></button>`).join('')
-    : '<div class="views-empty">No saved views yet.</div>';
-  const actions = current
-    ? `<div class="views-divider"></div><button type="button" class="ws-item" data-view-action="update">Update “${escapeHtml(current.name)}”</button><button type="button" class="ws-item views-danger" data-view-action="delete">Delete “${escapeHtml(current.name)}”</button>`
-    : '';
-  $('#viewsMenu').innerHTML = `<button type="button" class="ws-item views-create" data-view-action="create">+ Create view…</button><div class="views-divider"></div>${list}${actions}`;
+  const menu = $('#viewsMenu');
+  if (!menu) return;
+  menu.innerHTML = customViews.length
+    ? customViews.map(viewItemHtml).join('')
+    : '<div class="views-empty">No views yet. Set filters on the board, then choose Save as view.</div>';
 }
 
 function openViewsMenu(open) {
   const menu = $('#viewsMenu');
   if (!menu) return;
   menu.hidden = !open;
-  $('#viewsButton').setAttribute('aria-expanded', String(open));
+  $('#viewsToggle').setAttribute('aria-expanded', String(open));
   if (open) renderViewsMenu();
 }
 
@@ -596,19 +602,98 @@ function applyCustomView(id) {
   render();
 }
 
-function runViewAction(action) {
-  if (action === 'create') return openViewDialog();
-  if (action === 'update') return saveActiveViewChanges();
-  if (action === 'delete') return deleteActiveView();
+// ---- the Views window ------------------------------------------------------
+
+function openViewsWindow() {
+  if (!remoteMode) {
+    alert('Views need the desktop app and its local API.');
+    return;
+  }
+  renderViewsWindow();
+  $('#viewsWindowBackdrop').classList.add('open');
 }
 
-function openViewDialog() {
+function closeViewsWindow() {
+  $('#viewsWindowBackdrop').classList.remove('open');
+}
+
+function viewFiltersText(v) {
+  const labels = { priority: 'Priority', type: 'Type', status: 'Status', tag: 'Tag', sprint: 'Sprint' };
+  const parts = Object.entries(v.filters || {}).map(([key, value]) => {
+    const shown = key === 'sprint' ? (value === 'none' ? 'no sprint' : sprintName(value)) : value;
+    return `${labels[key] || key}: ${shown}`;
+  });
+  return parts.length ? parts.join(' · ') : 'No filters: every task';
+}
+
+function renderViewsWindow() {
+  const list = $('#viewsWindowList');
+  if (!list) return;
+  list.innerHTML = customViews.length
+    ? customViews.map(v => `<div class="views-window-row${v.id === activeCustomView ? ' active' : ''}">
+        <div class="views-window-info"><strong>${escapeHtml(v.name)}</strong><small>${escapeHtml(viewFiltersText(v))}</small></div>
+        <div class="views-window-actions">
+          <button type="button" class="button quiet" data-win-action="open" data-win-id="${v.id}">Open</button>
+          <button type="button" class="button quiet" data-win-action="update" data-win-id="${v.id}">Update</button>
+          <button type="button" class="button quiet" data-win-action="rename" data-win-id="${v.id}">Rename</button>
+          <button type="button" class="button quiet danger" data-win-action="delete" data-win-id="${v.id}">Delete</button>
+        </div>
+      </div>`).join('')
+    : '<div class="empty-note">No views yet. Set filters on the board, then choose Save as view.</div>';
+}
+
+async function windowAction(action, id) {
+  const found = customViews.find(v => v.id === Number(id));
+  if (!found) return;
+  if (action === 'open') {
+    closeViewsWindow();
+    applyCustomView(found.id);
+    return;
+  }
+  if (action === 'rename') {
+    openViewDialog('rename', found);
+    return;
+  }
+  try {
+    if (action === 'update') {
+      if (!confirm(`Update "${found.name}" with the layout and filters on the board now?`)) return;
+      await apiRequest(`/api/views/${enc(found.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ layout: view === 'list' ? 'list' : 'board', filters: currentFilterSnapshot() }),
+      });
+    } else if (action === 'delete') {
+      if (!confirm(`Delete the view "${found.name}"? Its tasks stay where they are.`)) return;
+      await apiRequest(`/api/views/${enc(found.id)}`, { method: 'DELETE' });
+      if (activeCustomView === found.id) activeCustomView = null;
+    }
+    await loadViews();
+    render();
+    renderViewsWindow();
+  } catch (error) {
+    alert(`Could not ${action} the view: ${errorText(error)}`);
+  }
+}
+
+// ---- the name dialog: save as view, and rename ----------------------------
+
+let viewDialogMode = 'create';
+let viewDialogTarget = null;
+
+function openViewDialog(mode = 'create', target = null) {
   if (!remoteMode) {
     alert('Saved views need the desktop app and its local API.');
     return;
   }
+  viewDialogMode = mode;
+  viewDialogTarget = target;
   const form = $('#viewForm');
   form.reset();
+  const renaming = mode === 'rename';
+  $('#viewDialogTitle').textContent = renaming ? 'Rename view' : 'Save as view';
+  $('#viewDialogSubmit').textContent = renaming ? 'Save name' : 'Save view';
+  $('#viewLayoutField').hidden = renaming;
+  $('#viewSummary').hidden = renaming;
+  form.elements.name.value = renaming ? target.name : '';
   form.elements.layout.value = view === 'list' ? 'list' : 'board';
   updateViewSummary();
   $('#viewBackdrop').classList.add('open');
@@ -629,59 +714,36 @@ function updateViewSummary() {
     : 'Saves no filters: every task on the board.';
 }
 
-async function createViewFromDialog(event) {
+async function submitViewDialog(event) {
   event.preventDefault();
   const form = event.target;
   const name = (form.elements.name.value || '').trim();
-  const layout = form.elements.layout.value;
   try {
-    const result = await apiRequest('/api/views', {
-      method: 'POST',
-      body: JSON.stringify({ workspace, name, layout, filters: currentFilterSnapshot() }),
-    });
-    activeCustomView = result.view.id;
+    if (viewDialogMode === 'rename') {
+      await apiRequest(`/api/views/${enc(viewDialogTarget.id)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+    } else {
+      const result = await apiRequest('/api/views', {
+        method: 'POST',
+        body: JSON.stringify({ workspace, name, layout: form.elements.layout.value, filters: currentFilterSnapshot() }),
+      });
+      activeCustomView = result.view.id;
+    }
     closeViewDialog();
     await loadViews();
     render();
+    renderViewsWindow();
   } catch (error) {
-    alert(`Could not create the view: ${errorText(error)}`);
+    alert(`Could not save the view: ${errorText(error)}`);
   }
 }
 
-async function saveActiveViewChanges() {
-  if (!activeCustomView) return;
-  const current = customViews.find(v => v.id === activeCustomView);
-  if (!confirm(`Update "${current?.name || 'this view'}" with the current layout and filters?`)) return;
-  try {
-    await apiRequest(`/api/views/${enc(activeCustomView)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ layout: view === 'list' ? 'list' : 'board', filters: currentFilterSnapshot() }),
-    });
-    await loadViews();
-    render();
-  } catch (error) {
-    alert(`Could not update the view: ${errorText(error)}`);
-  }
-}
-
-async function deleteActiveView() {
-  if (!activeCustomView) return;
-  const current = customViews.find(v => v.id === activeCustomView);
-  if (!confirm(`Delete the view "${current?.name || ''}"? Its tasks stay where they are.`)) return;
-  try {
-    await apiRequest(`/api/views/${enc(activeCustomView)}`, { method: 'DELETE' });
-    activeCustomView = null;
-    await loadViews();
-    render();
-  } catch (error) {
-    alert(`Could not delete the view: ${errorText(error)}`);
-  }
-}
-
-$('#viewsButton').onclick = () => openViewsMenu($('#viewsMenu').hidden);
-$('#viewForm').onsubmit = createViewFromDialog;
+$('#viewForm').onsubmit = submitViewDialog;
 $('#closeView').onclick = closeViewDialog;
 $('#cancelView').onclick = closeViewDialog;
+$('#closeViewsWindow').onclick = closeViewsWindow;
+$('#viewsWindowNew').onclick = () => openViewDialog('create');
+$('#viewsWindowBackdrop').addEventListener('click', e => { if (e.target.id === 'viewsWindowBackdrop') closeViewsWindow(); });
+$('#saveFilterView').onclick = () => openViewDialog('create');
 $('#viewBackdrop').addEventListener('click', e => { if (e.target.id === 'viewBackdrop') closeViewDialog(); });
 
 
@@ -790,7 +852,6 @@ function openSprintManager() {
     return;
   }
   renderSprintManager();
-  $('#sprintDaysForm').elements.days.value = currentWorkspace()?.sprintDays || 14;
   $('#sprintForm').reset();
   $('#sprintForm').elements.startDate.value = todayStr();
   updateSprintPreview();
@@ -859,7 +920,53 @@ $('#closeSprints').onclick = closeSprintManager;
 $('#sprintBackdrop').addEventListener('click', e => { if (e.target.id === 'sprintBackdrop') closeSprintManager(); });
 $('#sprintForm').onsubmit = createSprintFromForm;
 $('#sprintForm').addEventListener('input', updateSprintPreview);
-$('#sprintDaysForm').onsubmit = saveSprintDays;
+// ---- settings ----------------------------------------------------------------
+// Every setting lives here. Agent permissions are saved on the board; the default sprint length is
+// saved per board; the colour theme and the update controls are on this device.
+
+async function openSettings() {
+  $('#settingsSprintDaysForm').elements.days.value = currentWorkspace()?.sprintDays || 14;
+  $('#settingsBackdrop').classList.add('open');
+  await loadAgentSettings();
+}
+
+function closeSettings() {
+  $('#settingsBackdrop').classList.remove('open');
+}
+
+async function loadAgentSettings() {
+  const boxes = document.querySelectorAll('[data-agent-setting]');
+  if (!remoteMode) {
+    boxes.forEach(box => { box.disabled = true; });
+    return;
+  }
+  try {
+    const result = await apiRequest('/api/settings');
+    boxes.forEach(box => {
+      box.checked = Boolean(result.settings[box.dataset.agentSetting]);
+      box.disabled = false;
+    });
+  } catch {
+    boxes.forEach(box => { box.disabled = true; });
+  }
+}
+
+async function changeAgentSetting(key, enabled) {
+  try {
+    await apiRequest('/api/settings', { method: 'PUT', body: JSON.stringify({ key, enabled }) });
+  } catch (error) {
+    alert(`Could not change that setting: ${errorText(error)}`);
+    await loadAgentSettings();
+  }
+}
+
+$('#openSettings').onclick = openSettings;
+$('#closeSettings').onclick = closeSettings;
+$('#settingsBackdrop').addEventListener('click', e => { if (e.target.id === 'settingsBackdrop') closeSettings(); });
+$('#settingsSprintDaysForm').onsubmit = saveSprintDays;
+document.querySelectorAll('[data-agent-setting]').forEach(box => {
+  box.addEventListener('change', () => changeAgentSetting(box.dataset.agentSetting, box.checked));
+});
 
 
 // ---- dashboard -------------------------------------------------------------
@@ -893,7 +1000,7 @@ async function openTaskAnywhere(id, workspaceId) {
   openDrawer(id);
 }
 
-function dashboardBoardCard(b) {
+function dashboardWorkspaceRow(b) {
   const details = [
     `${b.active} active`,
     `${b.highPriority} high`,
@@ -901,10 +1008,9 @@ function dashboardBoardCard(b) {
     b.overdue ? `${b.overdue} overdue` : '',
     b.blocked ? `${b.blocked} blocked` : '',
   ].filter(Boolean).join(' · ');
-  return `<button type="button" class="dash-board" data-open-board="${escapeHtml(b.id)}">
-      <strong>${escapeHtml(b.name)}</strong>
-      <span class="dash-board-meta">${escapeHtml(details)}</span>
-      <small>${b.lastUpdated ? `Updated ${relativeTime(b.lastUpdated)}` : 'No changes yet'}</small>
+  return `<button type="button" class="dash-row" data-open-board="${escapeHtml(b.id)}">
+      <span><span class="dash-name">${escapeHtml(b.name)}</span>${escapeHtml(details)}</span>
+      <small>${b.lastUpdated ? relativeTime(b.lastUpdated) : 'No changes yet'}</small>
     </button>`;
 }
 
@@ -937,7 +1043,7 @@ function renderDashboard() {
 
   const upcoming = dashboardData.upcoming || [];
   const upcomingRows = upcoming.length
-    ? upcoming.map(u => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(u.id)}" data-workspace="${escapeHtml(u.workspace)}">
+    ? upcoming.slice(0, 5).map(u => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(u.id)}" data-workspace="${escapeHtml(u.workspace)}">
         <span><strong>${escapeHtml(u.id)}</strong>${escapeHtml(u.title)}</span>
         <small>${formatDate(u.due)}${single ? '' : ` · ${escapeHtml(u.workspaceName)}`}</small>
       </button>`).join('')
@@ -945,34 +1051,39 @@ function renderDashboard() {
 
   const recent = dashboardData.recent || [];
   const recentRows = recent.length
-    ? recent.map(h => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(h.taskId)}" data-workspace="${escapeHtml(h.taskWorkspace)}">
+    ? recent.slice(0, 5).map(h => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(h.taskId)}" data-workspace="${escapeHtml(h.taskWorkspace)}">
         <span><strong>${escapeHtml(h.taskId)}</strong>${escapeHtml(h.taskTitle)}${single ? '' : ` · ${escapeHtml(nameOf(h.taskWorkspace))}`}</span>
         <small>${escapeHtml(h.summary || h.action)} · ${relativeTime(h.at)}</small>
       </button>`).join('')
     : '<div class="empty-note">No changes recorded yet.</div>';
 
+  const recentBoards = [...boards]
+    .sort((a, b) => (b.lastUpdated || '').localeCompare(a.lastUpdated || ''))
+    .slice(0, 6);
+  const workspacesBox = single ? '' : `<section class="dash-box">
+      <div class="section-heading"><span>Recent workspaces</span><span>${boards.length}</span></div>
+      <div class="dash-list">${recentBoards.map(dashboardWorkspaceRow).join('') || '<div class="empty-note">No workspaces yet.</div>'}</div>
+    </section>`;
+
   box.innerHTML = `
-    <div class="stats-row dash-stats">
-      ${stat('Active work', totals.active)}
-      ${stat('High priority', totals.highPriority)}
-      ${stat(dueLabel, totals.dueSoon)}
-      ${stat('Blocked', totals.blocked)}
+    <div class="dash-top${single ? ' single' : ''}">
+      <div class="stats-row dash-stats">
+        ${stat('Active work', totals.active)}
+        ${stat('High priority', totals.highPriority)}
+        ${stat(dueLabel, totals.dueSoon)}
+        ${stat('Blocked', totals.blocked)}
+      </div>
+      ${workspacesBox}
     </div>
     <div class="dash-status">${pills}</div>
-    ${single ? '' : `<section class="dash-section">
-      <div class="section-heading"><span>Workspaces</span><span>${boards.length}</span></div>
-      <div class="dash-boards">${boards.map(dashboardBoardCard).join('')}</div>
-    </section>`}
-    <div class="dash-columns">
-      <section class="dash-section">
-        <div class="section-heading"><span>Due in the next 7 days</span><span>${upcoming.length}</span></div>
-        <div class="dash-list">${upcomingRows}</div>
-      </section>
-      <section class="dash-section">
-        <div class="section-heading"><span>Recent activity</span><span>${recent.length}</span></div>
-        <div class="dash-list">${recentRows}</div>
-      </section>
-    </div>`;
+    <section class="dash-section">
+      <div class="section-heading"><span>Due in the next 7 days</span><span>${upcoming.length} in total</span></div>
+      <div class="dash-list">${upcomingRows}</div>
+    </section>
+    <section class="dash-section">
+      <div class="section-heading"><span>Recent activity</span><span>Latest 5</span></div>
+      <div class="dash-list">${recentRows}</div>
+    </section>`;
 }
 
 // ---- tags and suggested model ----------------------------------------------
@@ -2014,6 +2125,8 @@ function closeTop() {
   if (isOpen('#changelogBackdrop')) return closeNotes();
   if (isOpen('#sprintBackdrop')) return closeSprintManager();
   if (isOpen('#viewBackdrop')) return closeViewDialog();
+  if (isOpen('#viewsWindowBackdrop')) return closeViewsWindow();
+  if (isOpen('#settingsBackdrop')) return closeSettings();
   if (isOpen('#jsonModalBackdrop')) return $('#jsonModalBackdrop').classList.remove('open');
   if (isOpen('#modalBackdrop')) return closeModal();
   if (isOpen('#taskDrawer')) return closeDrawer();
@@ -2137,15 +2250,11 @@ document.addEventListener('input', e => {
 
 document.addEventListener('click', e => {
   const viewItem = e.target.closest('[data-view-id]');
-  if (viewItem && viewItem.closest('#viewsMenu')) {
-    openViewsMenu(false);
-    return applyCustomView(viewItem.dataset.viewId);
-  }
-  const viewAction = e.target.closest('[data-view-action]');
-  if (viewAction && viewAction.closest('#viewsMenu')) {
-    openViewsMenu(false);
-    return runViewAction(viewAction.dataset.viewAction);
-  }
+  if (viewItem && viewItem.closest('#viewsMenu')) return applyCustomView(viewItem.dataset.viewId);
+  const winAction = e.target.closest('[data-win-action]');
+  if (winAction) return windowAction(winAction.dataset.winAction, winAction.dataset.winId);
+  if (e.target.closest('#viewsToggle')) return openViewsMenu($('#viewsMenu').hidden);
+  if (e.target.closest('#viewsButton')) return openViewsWindow();
   if (!e.target.closest('#viewsPicker')) openViewsMenu(false);
   const sprintButton = e.target.closest('[data-sprint-action]');
   if (sprintButton) return sprintAction(sprintButton.dataset.sprintId, sprintButton.dataset.sprintAction);

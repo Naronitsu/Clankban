@@ -211,6 +211,16 @@ fn row_to_view(row: &Row) -> rusqlite::Result<View> {
     })
 }
 
+/// What agents may do on the board, and the default for each. A person changes these in Settings.
+pub const AGENT_SETTINGS: &[(&str, bool)] = &[
+    ("agents_plan_sprints", true),
+    ("agents_run_sprints", true),
+    ("agents_comment", true),
+];
+
+/// The longest view name, in characters. Names show in the sidebar, so they stay short.
+pub const VIEW_NAME_MAX: usize = 20;
+
 /// The filters a request asks to save, keeping only the known keys with non-empty text values.
 fn view_filters(input: Option<&Value>) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
@@ -229,8 +239,8 @@ fn view_name(text: Option<&str>) -> Result<String, ApiError> {
     if name.is_empty() {
         return Err(ApiError::BadRequest("view name is required".into()));
     }
-    if name.chars().count() > 60 {
-        return Err(ApiError::BadRequest("view names are limited to 60 characters".into()));
+    if name.chars().count() > VIEW_NAME_MAX {
+        return Err(ApiError::BadRequest(format!("view names are limited to {VIEW_NAME_MAX} characters")));
     }
     Ok(name.to_string())
 }
@@ -901,6 +911,10 @@ impl Store {
                 suggested_root TEXT,
                 suggested_by TEXT
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS views (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 workspace_id TEXT NOT NULL,
@@ -1468,6 +1482,38 @@ impl Store {
             return Err(ApiError::NotFound);
         }
         Ok(())
+    }
+
+    /// Every setting, with its default where none is saved.
+    pub fn get_settings(&self) -> Result<std::collections::BTreeMap<String, bool>, ApiError> {
+        let conn = self.lock();
+        let mut settings: std::collections::BTreeMap<String, bool> =
+            AGENT_SETTINGS.iter().map(|(key, default)| (key.to_string(), *default)).collect();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let saved = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (key, value) in saved {
+            if settings.contains_key(&key) {
+                settings.insert(key, value != 0);
+            }
+        }
+        Ok(settings)
+    }
+
+    /// Changes one setting. Unknown names are refused.
+    pub fn set_setting(&self, key: &str, enabled: bool) -> Result<std::collections::BTreeMap<String, bool>, ApiError> {
+        if !AGENT_SETTINGS.iter().any(|(known, _)| *known == key) {
+            return Err(ApiError::BadRequest(format!("unknown setting: {key}")));
+        }
+        {
+            let conn = self.lock();
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, enabled as i64],
+            )?;
+        }
+        self.get_settings()
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, ApiError> {
@@ -2221,9 +2267,23 @@ mod tests {
 
         assert!(matches!(store.create_view(&board.id, Some("Bad"), Some("calendar"), None), Err(ApiError::BadRequest(_))));
         assert!(matches!(store.create_view(&board.id, Some("   "), Some("board"), None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_view(&board.id, Some(&"x".repeat(21)), Some("board"), None), Err(ApiError::BadRequest(_))), "names are at most 20 characters");
+        assert!(store.create_view(&board.id, Some(&"x".repeat(20)), Some("board"), None).is_ok());
         assert!(matches!(store.create_view("nope", Some("x"), Some("board"), None), Err(ApiError::NotFound)));
         store.delete_view(saved.id).unwrap();
         assert!(matches!(store.delete_view(saved.id), Err(ApiError::NotFound)));
+    }
+
+    #[test]
+    fn settings_default_to_allowed_and_can_be_changed() {
+        let store = Store::open_in_memory().unwrap();
+        let defaults = store.get_settings().unwrap();
+        assert!(AGENT_SETTINGS.iter().all(|(key, _)| defaults[*key]), "agents keep their current rights by default");
+        let changed = store.set_setting("agents_comment", false).unwrap();
+        assert!(!changed["agents_comment"]);
+        assert!(changed["agents_plan_sprints"], "other settings are untouched");
+        assert!(store.get_settings().unwrap()["agents_comment"] == false, "the change is kept");
+        assert!(matches!(store.set_setting("made_up", true), Err(ApiError::BadRequest(_))));
     }
 
     #[test]

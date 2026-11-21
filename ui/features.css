@@ -438,3 +438,64 @@ html, body { height: 100%; }
 .views-picker { position: relative; }
 .views-picker .views-button { width: 100%; }
 .views-caret { margin-left: auto; font-size: 11px; opacity: 0.7; }
+
+/* Views: an inline list under the Views item, with indented nav-style buttons. */
+.views-group { display: flex; flex-direction: column; }
+.views-caret { display: inline-block; margin-left: auto; font-size: 11px; opacity: 0.7; transition: transform 0.15s; }
+.views-button[aria-expanded="true"] .views-caret { transform: rotate(180deg); }
+.views-list { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 6px 22px; padding-left: 10px; border-left: 1px solid var(--sidebar-line); }
+.views-list[hidden] { display: none; }
+.nav-item.views-item { padding: 7px 10px; font-size: 13px; color: var(--sidebar-muted); }
+.nav-item.views-item:hover, .nav-item.views-item.active { color: var(--sidebar-ink); }
+.nav-item.views-item small { margin-left: auto; font-size: 11px; color: var(--sidebar-muted); }
+.nav-item.views-item.views-danger { color: #ff8b7b; }
+.views-list .views-divider { height: 1px; background: var(--sidebar-line); margin: 4px 6px; }
+.views-list .views-empty { padding: 6px 10px; font-size: 12px; color: var(--sidebar-muted); }
+
+/* Dashboard top row: stats on the left half, recent workspaces on the right. */
+.dash-top { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; align-items: stretch; }
+.dash-top.single { grid-template-columns: 1fr; }
+.dash-top .dash-stats { grid-template-columns: 1fr 1fr; margin: 0; gap: 12px; }
+.dash-box { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; min-width: 0; }
+.dash-box .dash-list { border: 0; border-radius: 0; background: transparent; }
+.dash-box .section-heading { margin-bottom: 4px; }
+.dash-name { font-weight: 600; font-size: 14px; color: var(--ink); margin-right: 10px; }
+@media (max-width: 900px) { .dash-top { grid-template-columns: 1fr; } }
+
+/* Views: the sidebar row (name and arrow), the dropdown, and the Views window. */
+.views-row { display: flex; align-items: stretch; gap: 4px; }
+.views-row .views-button { flex: 1; min-width: 0; }
+.views-toggle { flex: 0 0 auto; width: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--sidebar-muted); cursor: pointer; font-size: 12px; transition: transform 0.15s; }
+.views-toggle:hover { background: var(--sidebar-hover); color: var(--sidebar-ink); }
+.views-toggle[aria-expanded="true"] { transform: rotate(180deg); }
+.nav-item.views-item { padding: 7px 10px 7px 12px; font-size: 13px; color: var(--sidebar-muted); }
+.nav-item.views-item .view-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.nav-item.views-item.active { color: var(--sidebar-ink); background: var(--sidebar-active); box-shadow: inset 3px 0 0 var(--accent); }
+.field-hint { font-weight: 400; color: var(--muted); font-size: 11px; }
+.views-window { width: min(520px, calc(100vw - 32px)); max-height: 80vh; overflow-y: auto; }
+.views-window-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 14px; }
+.views-window-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.views-window-row:last-child { border-bottom: 0; }
+.views-window-row.active { background: var(--accent-soft); }
+.views-window-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.views-window-info strong { font-size: 14px; }
+.views-window-info small { font-size: 12px; color: var(--muted); }
+.views-window-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.views-window-actions .button { font-size: 12px; padding: 6px 10px; }
+
+/* The Clankban logo in the sidebar, in place of the letter C. */
+.brand-logo { width: 28px; height: 28px; flex: none; display: block; }
+
+/* Settings window. */
+.settings-modal { width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow-y: auto; }
+.settings-section { border-top: 1px solid var(--line); padding: 14px 0 8px; }
+.settings-section h3 { margin: 0 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.settings-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; font-size: 14px; }
+.settings-inline { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.settings-modal input[type="number"] { width: 90px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); font: inherit; font-size: 13px; }
+.settings-hint { font-size: 12px; color: var(--muted); margin: 4px 0 10px; }
+.settings-check { display: flex; align-items: center; gap: 10px; font-size: 14px; margin: 8px 0; cursor: pointer; }
+.settings-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.settings-check input:disabled + * , .settings-check:has(input:disabled) { opacity: 0.5; cursor: default; }
+.settings-section .update-panel { padding: 0; }
+.settings-section .update-panel small { color: var(--muted); font-size: 13px; }

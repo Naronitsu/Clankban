@@ -103,6 +103,22 @@ fn take_model(args: &mut Value) -> String {
         .unwrap_or_default()
 }
 
+/// Refuses an action when a person has turned off the agent permission for it in Settings.
+/// If the setting cannot be read, the action is refused too.
+async fn agent_allowed(base: &str, key: &str, action: &str) -> Result<(), String> {
+    let settings = http("GET", format!("{base}/api/settings"), None, Vec::new()).await?;
+    let allowed = settings
+        .get("settings")
+        .and_then(|s| s.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!("This board does not let agents {action}. A person can change it in Settings. Nothing was changed."))
+    }
+}
+
 /// The project folder a tool means: the `path` argument, or the folder the bridge was started in.
 fn project_folder(args: &Value) -> Result<String, String> {
     match args.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) {
@@ -164,6 +180,7 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             Ok(task)
         }
         "add_comment" => {
+            agent_allowed(base, "agents_comment", "comment on tasks").await?;
             let id = required_str(&args, "id")?.to_string();
             let body = required_str(&args, "body")?.to_string();
             http("POST", format!("{}/comments", task_url(base, &id)), Some(json!({ "body": body })), identity).await
@@ -230,6 +247,7 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             http("GET", format!("{base}/api/sprints?workspace={encoded}"), None, Vec::new()).await
         }
         "start_sprint" | "close_sprint" => {
+            agent_allowed(base, "agents_run_sprints", "open or close sprints").await?;
             // Only sprints on this agent's board can be opened or closed from here.
             let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| "id is required".to_string())?;
             let status = if name == "start_sprint" { "active" } else { "closed" };
@@ -247,6 +265,7 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             http("PATCH", format!("{base}/api/sprints/{id}"), Some(json!({ "status": status })), identity).await
         }
         "create_sprint" => {
+            agent_allowed(base, "agents_plan_sprints", "plan sprints").await?;
             // Agents plan sprints; a sprint is created planned. Starting and closing stay with the person.
             let workspace = resolve_board(&args, base).await?;
             let mut body = args.clone();

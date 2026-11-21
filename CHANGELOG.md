@@ -2,6 +2,17 @@
 
 Each release has a section headed `## <version>`. The release script copies that section into the update notes, so write it for the people who will read it.
 
+## 0.4.7 — 2026-11-21
+
+- Views are a sidebar item. The Views name never changes; its arrow opens the list of views, and the open view stays selected.
+- A Views window lists every view, with options to open, update, rename and delete it.
+- Save as view sits in the filter bar, saving the current filters and layout.
+- View names are at most 20 characters.
+- Sprints is a sidebar item of its own, below Views, in the same style as the other items.
+- The dashboard's top row shows the four totals beside Recent workspaces. Due in 7 days and Recent activity each show their top 5, stacked.
+- Settings is one place for every setting: the colour theme, the board's default sprint length, what agents may do on the board (plan sprints, open and close sprints, comment on tasks), and updates. A turned-off permission refuses the agent with a message.
+- The Clankban logo replaces the letter in the sidebar.
+
 ## 0.4.6 — 2026-11-21
 
 - Agents can plan sprints, open and close them, and list them, through MCP. They can only work on their own board, and only one sprint runs at a time.

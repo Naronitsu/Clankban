@@ -147,6 +147,19 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
                 Err(response) => response,
             };
         }
+        ("GET", "/api/settings") => {
+            return reply(store.get_settings().map(|settings| json!({ "settings": settings })), StatusCode::OK);
+        }
+        ("PUT", "/api/settings") => {
+            return match parse_body(body) {
+                Ok(input) => {
+                    let key = input.get("key").and_then(Value::as_str).unwrap_or("");
+                    let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+                    reply(store.set_setting(key, enabled).map(|settings| json!({ "settings": settings })), StatusCode::OK)
+                }
+                Err(response) => response,
+            };
+        }
         ("GET", "/api/dashboard") => {
             // Without a workspace, or with `workspace=all`, the dashboard covers every board.
             let scope = query_param(query, "workspace").filter(|w| w != "all");

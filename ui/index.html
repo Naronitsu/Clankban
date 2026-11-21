@@ -23,7 +23,7 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">C</span><span>clankban</span><span class="brand-local">LOCAL</span></div>
+      <div class="brand"><img class="brand-logo" src="logo.png" alt="" /><span>clankban</span><span class="brand-local">LOCAL</span></div>
       <div class="workspace-switcher">
         <div class="ws-picker">
           <button class="ws-button" id="workspaceButton" aria-haspopup="listbox" aria-expanded="false" title="Switch workspace">
@@ -43,20 +43,19 @@
         <button class="nav-item" data-view="recent"><span>◷</span> Recent changes <span class="nav-count coral" id="navRecentCount">0</span></button>
         <button class="nav-item" data-view="agent"><span>✦</span> Agent runs <span class="nav-count" id="navAgentCount">0</span></button>
         <button class="nav-item" data-view="docs"><span>❡</span> Project docs</button>
+        <div class="views-group" id="viewsPicker">
+          <div class="views-row">
+            <button class="nav-item views-button" id="viewsButton" type="button"><span>❖</span> Views</button>
+            <button class="views-toggle" id="viewsToggle" type="button" aria-label="Show the list of views" aria-expanded="false">▾</button>
+          </div>
+          <div class="views-list" id="viewsMenu" hidden></div>
+        </div>
+        <button class="nav-item" id="openSprints" type="button"><span>◎</span> Sprints</button>
       </nav>
-      <div class="views-picker" id="viewsPicker">
-        <button class="nav-item views-button" id="viewsButton" type="button" aria-haspopup="true" aria-expanded="false"><span>❖</span> Views <span class="views-caret">▾</span></button>
-        <div class="ws-menu views-menu" id="viewsMenu" hidden></div>
-      </div>
-      <button class="nav-item" id="openSprints" type="button"><span>◎</span> Sprints</button>
       <div class="sidebar-spacer"></div>
 
       <div class="agent-status"><span class="status-dot" id="syncDot"></span><div><strong id="syncStatus">Connecting…</strong><small id="syncDetail"></small></div></div>
-      <button class="button quiet theme-toggle" id="themeToggle">Dark mode</button>
-      <div class="update-panel">
-        <small>Version <span id="appVersion">—</span> · <span id="updateStatus"></span></small>
-        <div class="update-actions"><button class="button quiet" id="checkUpdates">Check for updates</button><button class="button quiet" id="showChangelog">What's new</button><button class="button primary" id="installUpdate" hidden>Install update</button></div>
-      </div>
+      <button class="nav-item settings-item" id="openSettings" type="button"><span>⚙</span> Settings</button>
     </aside>
 
     <main class="main-content" id="board">
@@ -77,7 +76,7 @@
         <label>Priority<select id="filterPriority"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
         <label>Type<select id="filterType"><option value="">Any</option><option value="epic">Epic</option><option value="task">Task</option><option value="subtask">Subtask</option><option value="bug">Bug fix</option></select></label>
         <label>Tag<select id="filterTag"><option value="">Any</option><option value="important">Important</option><option value="on hold">On hold</option></select></label><label>Sprint<select id="filterSprint"><option value="">Any</option><option value="none">No sprint</option></select></label><label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
-        <button class="button quiet" id="clearFilters" type="button">Clear</button>
+        <button class="button quiet" id="saveFilterView" type="button">Save as view…</button><button class="button quiet" id="clearFilters" type="button">Clear</button>
       </section>
 
       <section class="board" id="boardGrid"></section>
@@ -136,28 +135,70 @@
         <div class="sprint-preview" id="sprintPreview"></div>
         <div class="modal-actions"><button class="button primary" type="submit">Create sprint</button></div>
       </form>
-      <form id="sprintDaysForm" class="sprint-form" autocomplete="off">
-        <div class="sprint-section-title">Board default</div>
-        <p class="sprint-hint">New sprints use this length when no length or end date is given.</p>
-        <div class="sprint-row-fields">
-          <label class="sprint-field">Length<span class="sprint-length"><input type="number" name="days" min="1" max="90" required /><em>days</em></span></label>
-        </div>
-        <div class="modal-actions"><button class="button quiet" type="submit">Save default</button></div>
-      </form>
     </div>
   </div>
 
   <div class="json-modal-backdrop" id="viewBackdrop">
     <form class="json-modal view-modal" id="viewForm" autocomplete="off">
       <div class="modal-header">
-        <div><div class="eyebrow">Board</div><h2>Create view</h2></div>
+        <div><div class="eyebrow">Board</div><h2 id="viewDialogTitle">Save as view</h2></div>
         <button type="button" class="close-button" id="closeView" aria-label="Close">×</button>
       </div>
-      <label class="sprint-field">Name<input name="name" required placeholder="Sprint 4, high priority" /></label>
-      <label class="sprint-field">Shows<select name="layout"><option value="board">Board</option><option value="list">List</option></select></label>
+      <label class="sprint-field">Name<input name="name" required maxlength="20" placeholder="Sprint 4 high" /><small class="field-hint">20 characters at most</small></label>
+      <label class="sprint-field" id="viewLayoutField">Shows<select name="layout"><option value="board">Board</option><option value="list">List</option></select></label>
       <div class="view-summary" id="viewSummary"></div>
-      <div class="modal-actions"><button type="button" class="button quiet" id="cancelView">Cancel</button><button class="button primary" type="submit">Create view</button></div>
+      <div class="modal-actions"><button type="button" class="button quiet" id="cancelView">Cancel</button><button class="button primary" type="submit" id="viewDialogSubmit">Save view</button></div>
     </form>
+  </div>
+
+  <div class="json-modal-backdrop" id="viewsWindowBackdrop">
+    <div class="json-modal views-window" role="dialog" aria-labelledby="viewsWindowTitle">
+      <div class="modal-header">
+        <div><div class="eyebrow">Board</div><h2 id="viewsWindowTitle">Views</h2></div>
+        <button class="close-button" id="closeViewsWindow" aria-label="Close">×</button>
+      </div>
+      <div id="viewsWindowList" class="views-window-list"></div>
+      <div class="modal-actions"><button type="button" class="button primary" id="viewsWindowNew">Save current filters as view…</button></div>
+    </div>
+  </div>
+
+  <div class="json-modal-backdrop" id="settingsBackdrop">
+    <div class="json-modal settings-modal" role="dialog" aria-labelledby="settingsTitle">
+      <div class="modal-header">
+        <div><div class="eyebrow">Clankban</div><h2 id="settingsTitle">Settings</h2></div>
+        <button class="close-button" id="closeSettings" aria-label="Close">×</button>
+      </div>
+
+      <section class="settings-section">
+        <h3>Appearance</h3>
+        <div class="settings-row"><span>Colour theme</span><button class="button quiet" id="themeToggle" type="button">Dark mode</button></div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Board</h3>
+        <form id="settingsSprintDaysForm" class="settings-row" autocomplete="off">
+          <label class="settings-inline">Default sprint length<span class="sprint-length"><input type="number" name="days" min="1" max="90" required /><em>days</em></span></label>
+          <button class="button quiet" type="submit">Save</button>
+        </form>
+        <p class="settings-hint">This board's new sprints use this length when no length or end date is given.</p>
+      </section>
+
+      <section class="settings-section">
+        <h3>Agents on this board</h3>
+        <p class="settings-hint">Turn off what agents may do here. An agent that tries is refused, and nothing changes.</p>
+        <label class="settings-check"><input type="checkbox" data-agent-setting="agents_plan_sprints" /> Plan sprints</label>
+        <label class="settings-check"><input type="checkbox" data-agent-setting="agents_run_sprints" /> Open and close sprints</label>
+        <label class="settings-check"><input type="checkbox" data-agent-setting="agents_comment" /> Comment on tasks</label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Updates</h3>
+        <div class="update-panel">
+          <small>Version <span id="appVersion">—</span> · <span id="updateStatus"></span></small>
+          <div class="update-actions"><button class="button quiet" id="checkUpdates">Check for updates</button><button class="button quiet" id="showChangelog">What's new</button><button class="button primary" id="installUpdate" hidden>Install update</button></div>
+        </div>
+      </section>
+    </div>
   </div>
 
   <div class="palette-backdrop" id="paletteBackdrop">
