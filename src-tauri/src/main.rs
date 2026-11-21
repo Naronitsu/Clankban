@@ -9,8 +9,10 @@ mod store;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::store::Store;
 
@@ -50,6 +52,7 @@ fn main() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![check_for_update, install_update])
         .setup(|app| {
             let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
 
@@ -82,6 +85,7 @@ fn main() {
                 .background_color(tauri::window::Color(247, 248, 252, 255))
                 .initialization_script(&init)
                 .build()?;
+            spawn_update_checks(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!());
@@ -132,4 +136,49 @@ fn run_mcp() -> Result<(), String> {
         };
         mcp::run(api_url).await.map_err(|e| e.to_string())
     })
+}
+
+/// First check a few seconds after launch, then every six hours while the app stays open.
+const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(8);
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Checks for a newer release in the background. When one exists, the page is told
+/// through the `update-available` event with the new version number.
+fn spawn_update_checks(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FIRST_UPDATE_CHECK).await;
+        loop {
+            if let Ok(Some(version)) = find_update(&app).await {
+                let _ = app.emit("update-available", version);
+            }
+            tokio::time::sleep(UPDATE_CHECK_EVERY).await;
+        }
+    });
+}
+
+/// The version of a newer release, or `None` when this one is current.
+async fn find_update(app: &AppHandle) -> Result<Option<String>, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    Ok(update.map(|u| u.version))
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
+    find_update(&app).await
+}
+
+/// Downloads and installs the newest release, then restarts Clankban.
+/// The updater verifies the release signature before anything is installed.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Err("No update is available.".into());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
 }

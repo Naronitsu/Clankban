@@ -59,7 +59,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 Copy-Item $installer.FullName $outDir -Force
 Copy-Item $sigPath $outDir -Force
 $latestPath = Join-Path $outDir 'latest.json'
-$latest | ConvertTo-Json -Depth 6 | Set-Content -Path $latestPath -Encoding utf8
+[System.IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
 
 # Portable single-file build, for people who do not want the installer.
 $portableName = "Clankban-$Version-portable.exe"

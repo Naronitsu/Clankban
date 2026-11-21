@@ -664,49 +664,54 @@ async function cancelRun(id) {
 }
 
 // ---- updates ---------------------------------------------------------------
-// Uses the Tauri updater and process plugins. In a plain browser these are absent and the controls explain why.
+// The desktop app checks for updates in Rust: a few seconds after launch and every six hours.
+// When a newer version exists it sends an "update-available" event. In a plain browser there is
+// no desktop shell, so the controls say so.
 
 const tauriApi = window.__TAURI__;
-let pendingUpdate = null;
+const tauriCore = tauriApi?.core;
+const tauriEvent = window.__TAURI__?.event;
 
 function setUpdateStatus(text) { $('#updateStatus').textContent = text; }
 
+function offerUpdate(version) {
+  setUpdateStatus(`Version ${version} is available.`);
+  $('#installUpdate').textContent = `Install ${version} and restart`;
+  $('#installUpdate').disabled = false;
+  $('#installUpdate').hidden = false;
+}
+
 async function checkForUpdates({ silent = false } = {}) {
-  if (!tauriApi?.updater) {
+  if (!tauriCore) {
     if (!silent) setUpdateStatus('Updates work in the installed app.');
     return;
   }
   if (!silent) setUpdateStatus('Checking…');
   try {
-    const update = await tauriApi.updater.check();
-    pendingUpdate = update;
-    if (update) {
-      setUpdateStatus(`Version ${update.version} is available.`);
-      $('#installUpdate').textContent = `Install ${update.version} and restart`;
-      $('#installUpdate').disabled = false;
-      $('#installUpdate').hidden = false;
-    } else if (!silent) {
-      setUpdateStatus('You have the latest version.');
-    }
+    const version = await tauriCore.invoke('check_for_update');
+    if (version) offerUpdate(version);
+    else if (!silent) setUpdateStatus('You have the latest version.');
   } catch (error) {
     if (!silent) setUpdateStatus(`Could not check: ${error}`);
   }
 }
 
 async function installUpdate() {
-  if (!pendingUpdate) return;
-  if (!confirm(`Install version ${pendingUpdate.version} now? Clankban will restart.`)) return;
+  if (!tauriCore) return;
+  if (!confirm('Install the update now? Clankban will restart when it is done.')) return;
   $('#installUpdate').disabled = true;
   setUpdateStatus('Downloading…');
   try {
-    await pendingUpdate.downloadAndInstall();
+    await tauriCore.invoke('install_update');
     setUpdateStatus('Restarting…');
-    await tauriApi.process.relaunch();
   } catch (error) {
     $('#installUpdate').disabled = false;
     setUpdateStatus(`Update failed: ${error}`);
   }
 }
+
+if (tauriEvent) tauriEvent.listen('update-available', event => offerUpdate(event.payload));
+if (tauriCore) setTimeout(() => checkForUpdates({ silent: true }), 4000);
 
 async function showAppVersion() {
   try {
@@ -828,4 +833,3 @@ render();
 loadRemoteTasks();
 if (remoteMode) setInterval(loadRemoteTasks, 5000);
 showAppVersion();
-if (tauriApi?.updater) setTimeout(() => checkForUpdates({ silent: true }), 4000);
