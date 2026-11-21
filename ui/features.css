@@ -247,3 +247,98 @@ html, body { height: 100%; }
 .board-request small { display: block; margin-top: 3px; color: var(--muted); }
 .board-request code { font-size: 12px; word-break: break-all; }
 .board-request-actions { display: flex; gap: 8px; }
+
+/* Tags and the suggested model on tasks. */
+.tag-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+.tag-chip { font: 600 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em; padding: 3px 8px; border-radius: 999px; background: var(--hover); color: var(--ink-2); border: 1px solid var(--line); }
+.tag-chip.important { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.tag-chip.on-hold { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.drawer-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -8px 0 22px; }
+.tag-toggle { font: 600 12px 'Space Grotesk', sans-serif; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+.tag-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.tag-toggle.on.important { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.tag-toggle.on.on-hold { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.model-suggest { font-size: 11px; color: var(--muted); }
+.model-suggest code { font-family: 'DM Mono', monospace; font-size: 11px; }
+
+/* An agent-generated HTML page in the project docs, shown in a sandboxed frame. */
+.doc-frame { display: block; width: 100%; min-height: 70vh; border: 0; border-radius: 10px; background: #fff; }
+
+/* Task descriptions: Markdown with code blocks and links. */
+.task-description { font-size: 13px; line-height: 1.6; color: var(--ink-2); margin: 0 0 20px; }
+.task-description p { margin: 0 0 8px; }
+.task-description h1, .task-description h2, .task-description h3 { font-size: 15px; margin: 14px 0 6px; color: var(--ink); }
+.task-description ul, .task-description ol { padding-left: 20px; margin: 0 0 8px; }
+.task-description pre, .comment-body pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow-x: auto; }
+.task-description pre code, .comment-body pre code { font-family: 'DM Mono', monospace; font-size: 12px; background: none; padding: 0; }
+.task-description code, .comment-body code { font-family: 'DM Mono', monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.ext-link { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+
+/* Relationships, pick-up notes and links in the drawer. */
+.rel-group { margin-bottom: 12px; }
+.rel-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+.rel-items { display: flex; flex-wrap: wrap; gap: 6px; }
+.link-items { flex-direction: column; align-items: flex-start; }
+.task-chip { font: 600 12px 'Space Grotesk', sans-serif; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); border-radius: 999px; padding: 4px 10px; cursor: pointer; text-align: left; }
+.task-chip:hover { border-color: var(--accent); color: var(--accent); }
+.task-chip.done { text-decoration: line-through; opacity: 0.7; }
+.pickup-note { padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 13px; margin-bottom: 14px; }
+
+/* Comments. */
+.comment-list { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.comment { padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
+.comment-who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; margin-bottom: 6px; }
+.comment-body { font-size: 13px; line-height: 1.55; color: var(--ink-2); }
+.comment-body p { margin: 0 0 6px; }
+.comment-form textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink); font: inherit; font-size: 13px; resize: vertical; }
+.comment-form textarea:focus { outline: none; border-color: var(--accent); }
+
+/* A checkbox row inside the task form. */
+.check-row { flex-direction: row !important; align-items: center; gap: 8px !important; font-weight: 500 !important; }
+.check-row input { width: auto !important; margin: 0; }
+
+/* Dashboard: the first screen, across all boards or for one board. */
+.dashboard-view { margin-top: 8px; }
+.dashboard-view[hidden] { display: none; }
+.dash-status { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 24px; }
+.dash-pill { font: 600 12px 'Space Grotesk', sans-serif; padding: 6px 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-2); }
+.dash-pill b { font-family: 'DM Mono', monospace; margin-left: 6px; color: var(--ink); }
+.dash-section { margin-bottom: 26px; }
+.dash-boards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.dash-board { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; cursor: pointer; }
+.dash-board:hover { border-color: var(--accent); }
+.dash-board strong { font-size: 15px; }
+.dash-board-meta { font-size: 12px; color: var(--ink-2); }
+.dash-board small { font-size: 11px; color: var(--muted); }
+.dash-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.dash-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.dash-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.dash-row:last-child { border-bottom: 0; }
+.dash-row:hover { background: var(--hover); }
+.dash-row strong { margin-right: 8px; font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); font-weight: 500; }
+.dash-row small { color: var(--muted); white-space: nowrap; }
+.crumb-link { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.crumb-link:hover { text-decoration: underline; }
+@media (max-width: 900px) { .dash-columns { grid-template-columns: 1fr; } }
+
+/* Sprints: the manager dialog and the sprint chip on tasks. */
+.sprint-modal { width: min(560px, calc(100vw - 32px)); max-height: 85vh; overflow-y: auto; }
+.sprint-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 18px; }
+.sprint-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sprint-row:last-child { border-bottom: 0; }
+.sprint-meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.sprint-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.sprint-status { font: 600 10px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 999px; background: var(--hover); color: var(--muted); margin-left: 4px; }
+.sprint-status.active { background: var(--ok-soft); color: var(--ok); }
+.sprint-status.planned { background: var(--accent-soft); color: var(--accent); }
+.sprint-form h3 { margin: 4px 0 12px; font-size: 14px; }
+.sprint-form label { margin-bottom: 12px; }
+.tag-chip.sprint-chip { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.button.danger { color: var(--danger); }
+
+/* Saved views: the sidebar dropdown and its buttons. */
+.view-picker { display: flex; flex-direction: column; gap: 8px; padding: 0 4px 4px; }
+.view-picker select { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--sidebar-line); background: var(--sidebar-hover); color: var(--sidebar-ink); font: inherit; font-size: 13px; }
+.view-picker select option { background: var(--surface); color: var(--ink); }
+.view-picker-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.view-picker-actions .button { flex: 1; font-size: 12px; padding: 6px 8px; }

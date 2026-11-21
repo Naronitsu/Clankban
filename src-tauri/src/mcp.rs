@@ -157,8 +157,16 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             Ok(context)
         }
         "get_task" => {
-            let id = required_str(&args, "id")?;
-            http("GET", task_url(base, id), None, Vec::new()).await
+            let id = required_str(&args, "id")?.to_string();
+            let mut task = http("GET", task_url(base, &id), None, Vec::new()).await?;
+            let comments = http("GET", format!("{}/comments", task_url(base, &id)), None, Vec::new()).await?;
+            task["comments"] = comments.get("comments").cloned().unwrap_or_else(|| json!([]));
+            Ok(task)
+        }
+        "add_comment" => {
+            let id = required_str(&args, "id")?.to_string();
+            let body = required_str(&args, "body")?.to_string();
+            http("POST", format!("{}/comments", task_url(base, &id)), Some(json!({ "body": body })), identity).await
         }
         "get_task_history" => {
             let id = required_str(&args, "id")?;
@@ -366,6 +374,14 @@ fn tool_definitions() -> Value {
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
                     "docs": { "type": "array", "items": { "type": "string" }, "description": "Project Markdown files this task relates to, relative to the project folder, for example docs/TASKS.md" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Labels such as important or on hold. Replaces the list." },
+                    "suggestedModel": { "type": "string", "description": "A model suggested for this task, for example claude-haiku-5-5. A suggestion only; the agent may choose another. Empty clears it." },
+                    "blockedBy": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must be finished before this task can start. Replaces the list." },
+                    "relatesTo": { "type": "array", "items": { "type": "string" }, "description": "Task ids this task relates to, with no order between them. Replaces the list." },
+                    "standalone": { "type": "boolean", "description": "False when this task cannot be picked up on its own; standaloneNote says why." },
+                    "standaloneNote": { "type": "string", "description": "Why the task cannot be picked up on its own. Empty when it can." },
+                    "links": { "type": "array", "items": { "type": "string" }, "description": "Related links, http or https only. Replaces the list." },
+                    "sprint": { "type": ["integer", "null"], "description": "The sprint this task is in: a sprint id from the board, or null to take it out of its sprint." },
                     "workspace": { "type": "string" },
                     "model": { "type": "string" },
                     "subtasks": {
@@ -394,6 +410,14 @@ fn tool_definitions() -> Value {
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
                     "docs": { "type": "array", "items": { "type": "string" }, "description": "Project Markdown files this task relates to, relative to the project folder, for example docs/TASKS.md" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Labels such as important or on hold. Replaces the list." },
+                    "suggestedModel": { "type": "string", "description": "A model suggested for this task, for example claude-haiku-5-5. A suggestion only; the agent may choose another. Empty clears it." },
+                    "blockedBy": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must be finished before this task can start. Replaces the list." },
+                    "relatesTo": { "type": "array", "items": { "type": "string" }, "description": "Task ids this task relates to, with no order between them. Replaces the list." },
+                    "standalone": { "type": "boolean", "description": "False when this task cannot be picked up on its own; standaloneNote says why." },
+                    "standaloneNote": { "type": "string", "description": "Why the task cannot be picked up on its own. Empty when it can." },
+                    "links": { "type": "array", "items": { "type": "string" }, "description": "Related links, http or https only. Replaces the list." },
+                    "sprint": { "type": ["integer", "null"], "description": "The sprint this task is in: a sprint id from the board, or null to take it out of its sprint." },
                     "workspace": { "type": "string", "description": "Move the task to this workspace" },
                     "subtasks": {
                         "type": "array",
@@ -422,7 +446,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "list_project_docs",
-            "description": "List the Markdown files in the project folder connected to a workspace. Paths are relative to the project folder. Read-only.",
+            "description": "List the Markdown and HTML files in the project folder connected to a workspace. Paths are relative to the project folder. Read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "workspace": { "type": "string", "description": "Defaults to \"default\"" } }
@@ -430,7 +454,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "read_project_doc",
-            "description": "Read one Markdown file from the project folder connected to a workspace. Pass a path from list_project_docs. Read-only.",
+            "description": "Read one Markdown or HTML file from the project folder connected to a workspace. Pass a path from list_project_docs. Read-only.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -438,6 +462,19 @@ fn tool_definitions() -> Value {
                     "workspace": { "type": "string", "description": "Defaults to \"default\"" }
                 },
                 "required": ["path"]
+            }
+        },
+        {
+            "name": "add_comment",
+            "description": format!("Add a comment to a task, for people and agents to read. Use it for progress notes, questions, and decisions.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id, for example AT-40" },
+                    "body": { "type": "string", "description": "The comment text. Up to 4000 characters." },
+                    "model": { "type": "string" }
+                },
+                "required": ["id", "body"]
             }
         },
         {
@@ -521,7 +558,7 @@ mod tests {
     #[test]
     fn tool_list_includes_workspace_and_history_tools() {
         let names = names();
-        for expected in ["list_workspaces", "resolve_workspace", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
+        for expected in ["list_workspaces", "add_comment", "resolve_workspace", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
     }

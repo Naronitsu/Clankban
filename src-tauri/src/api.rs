@@ -100,15 +100,57 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
             );
         }
         ("GET", "/api/history") => {
-            let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            // `workspace=all` covers every board; a board id limits it to that board.
+            let scope = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            let workspace = if scope == "all" { None } else { Some(scope.as_str()) };
             let limit = query_param(query, "limit")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(100)
                 .clamp(1, 500);
             return reply(
-                store.recent_history(&workspace, limit).map(|history| json!({ "history": history })),
+                store.recent_history(workspace, limit).map(|history| json!({ "history": history })),
                 StatusCode::OK,
             );
+        }
+        ("GET", "/api/views") => {
+            let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            return reply(store.list_views(&workspace).map(|views| json!({ "views": views })), StatusCode::OK);
+        }
+        ("POST", "/api/views") => {
+            return match parse_body(body) {
+                Ok(input) => {
+                    let workspace = input.get("workspace").and_then(Value::as_str).unwrap_or(DEFAULT_WORKSPACE);
+                    let name = input.get("name").and_then(Value::as_str);
+                    let layout = input.get("layout").and_then(Value::as_str);
+                    reply(
+                        store.create_view(workspace, name, layout, input.get("filters")).map(|view| json!({ "view": view })),
+                        StatusCode::CREATED,
+                    )
+                }
+                Err(response) => response,
+            };
+        }
+        ("GET", "/api/sprints") => {
+            let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            return reply(store.list_sprints(&workspace).map(|sprints| json!({ "sprints": sprints })), StatusCode::OK);
+        }
+        ("POST", "/api/sprints") => {
+            return match parse_body(body) {
+                Ok(input) => {
+                    let workspace = input.get("workspace").and_then(Value::as_str).unwrap_or(DEFAULT_WORKSPACE);
+                    let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+                    let start = input.get("startDate").and_then(Value::as_str);
+                    let end = input.get("endDate").and_then(Value::as_str);
+                    let length = input.get("lengthDays").and_then(Value::as_i64);
+                    reply(store.create_sprint(workspace, name, start, length, end), StatusCode::CREATED)
+                }
+                Err(response) => response,
+            };
+        }
+        ("GET", "/api/dashboard") => {
+            // Without a workspace, or with `workspace=all`, the dashboard covers every board.
+            let scope = query_param(query, "workspace").filter(|w| w != "all");
+            return reply(store.dashboard(scope.as_deref()), StatusCode::OK);
         }
         ("GET", "/api/agent-context") => {
             let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
@@ -212,6 +254,19 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
     // Project folder: read-only views of its Markdown, plus setting the folder itself.
     if let Some(rest) = path.strip_prefix("/api/workspaces/") {
         // An agent proposes a folder (PUT); a person dismisses the proposal (DELETE).
+        // The default sprint length for this board: PUT /api/workspaces/:id/sprint-days with {days}.
+        if let Some(raw) = rest.strip_suffix("/sprint-days") {
+            let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+            if method == "PUT" {
+                return match parse_body(body) {
+                    Ok(input) => {
+                        let days = input.get("days").and_then(Value::as_i64).unwrap_or(0);
+                        reply(store.set_sprint_days(&id, days).map(|workspace| json!({ "workspace": workspace })), StatusCode::OK)
+                    }
+                    Err(response) => response,
+                };
+            }
+        }
         if let Some(raw) = rest.strip_suffix("/suggestion") {
             let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
             match method {
@@ -295,6 +350,38 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
         };
     }
 
+    if let Some(rest) = path.strip_prefix("/api/views/") {
+        // Update (PATCH) or delete (DELETE) one saved view by its number.
+        let Ok(id) = rest.parse::<i64>() else { return error(ApiError::NotFound) };
+        return match method {
+            "PATCH" => match parse_body(body) {
+                Ok(input) => reply(store.update_view(id, &input).map(|view| json!({ "view": view })), StatusCode::OK),
+                Err(response) => response,
+            },
+            "DELETE" => match store.delete_view(id) {
+                Ok(()) => (StatusCode::OK, json!({ "deleted": id })),
+                Err(e) => error(e),
+            },
+            _ => error(ApiError::NotFound),
+        };
+    }
+
+    if let Some(rest) = path.strip_prefix("/api/sprints/") {
+        // Edit (PATCH) or delete (DELETE) one sprint by its number.
+        let Ok(id) = rest.parse::<i64>() else { return error(ApiError::NotFound) };
+        return match method {
+            "PATCH" => match parse_body(body) {
+                Ok(input) => reply(store.update_sprint(id, &input), StatusCode::OK),
+                Err(response) => response,
+            },
+            "DELETE" => match store.delete_sprint(id) {
+                Ok(()) => (StatusCode::OK, json!({ "deleted": id })),
+                Err(e) => error(e),
+            },
+            _ => error(ApiError::NotFound),
+        };
+    }
+
     if let Some(rest) = path.strip_prefix("/api/board-requests/") {
         // A person decides a request on the board: POST /api/board-requests/:id/approve or /reject.
         if method == "POST" {
@@ -322,6 +409,23 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
     }
 
     if let Some(rest) = path.strip_prefix("/api/tasks/") {
+        if let Some(raw_id) = rest.strip_suffix("/comments") {
+            // Comments on a task: GET lists them (newest first), POST adds one from the caller.
+            if !raw_id.is_empty() && !raw_id.contains('/') {
+                let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
+                return match method {
+                    "GET" => reply(store.list_comments(&id).map(|comments| json!({ "comments": comments })), StatusCode::OK),
+                    "POST" => match parse_body(body) {
+                        Ok(input) => {
+                            let text = input.get("body").and_then(Value::as_str).unwrap_or("");
+                            reply(store.add_comment(&id, text, actor), StatusCode::CREATED)
+                        }
+                        Err(response) => response,
+                    },
+                    _ => error(ApiError::NotFound),
+                };
+            }
+        }
         if let Some(raw_id) = rest.strip_suffix("/history") {
             if method == "GET" && !raw_id.is_empty() && !raw_id.contains('/') {
                 let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();

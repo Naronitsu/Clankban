@@ -28,8 +28,13 @@ function persist() {
 }
 
 let tasks = readCache() || (remoteMode ? [] : SEED);
-let view = 'board';
-let filters = { priority: '', type: '', status: '' };
+let view = remoteMode ? 'dashboard' : 'board';
+let dashboardScope = 'all';   // 'all' boards, or 'workspace' for the current board
+let dashboardData = null;
+let sprints = [];
+let customViews = [];
+let activeCustomView = null;   // the id of the saved view being shown, or null
+let filters = { priority: '', type: '', status: '', tag: '', sprint: '' };
 let activeTaskId = null;
 let editingId = null;
 let lastSync = null;
@@ -76,7 +81,8 @@ async function loadRemoteTasks() {
     if (!workspaces.some(w => w.id === workspace)) setWorkspace('default', false);
     const result = await apiRequest(`/api/tasks?workspace=${enc(workspace)}`);
     tasks = result.tasks;
-    await Promise.all([loadRunRequests(), loadSkills(), loadBoardRequests()]);
+    await Promise.all([loadRunRequests(), loadSkills(), loadBoardRequests(), loadSprints(), loadViews()]);
+    if (view === 'dashboard') await loadDashboard();
     syncOk = true;
     lastSync = new Date();
     persist();
@@ -96,6 +102,7 @@ async function loadWorkspaces() {
 
 function setWorkspace(id, reload = true) {
   workspace = id;
+  activeCustomView = null;
   projectDocs = null;
   selectedDoc = null;
   docBody = '';
@@ -259,6 +266,9 @@ function matches(t) {
   if (filters.priority && t.priority !== filters.priority) return false;
   if (filters.type && t.type !== filters.type) return false;
   if (filters.status && t.status !== filters.status) return false;
+  if (filters.tag && !(t.tags || []).includes(filters.tag)) return false;
+  if (filters.sprint === 'none' && t.sprint) return false;
+  if (filters.sprint && filters.sprint !== 'none' && String(t.sprint || '') !== filters.sprint) return false;
   return true;
 }
 function visibleTasks() {
@@ -274,9 +284,10 @@ function syncFilterUI() {
   $('#filterPriority').value = filters.priority;
   $('#filterType').value = filters.type;
   $('#filterStatus').value = filters.status;
+  $('#filterTag').value = filters.tag;
 }
 function resetFilters() {
-  filters = { priority: '', type: '', status: '' };
+  filters = { priority: '', type: '', status: '', tag: '', sprint: '' };
   syncFilterUI();
 }
 
@@ -316,7 +327,7 @@ function card(t) {
   const children = tasks.filter(x => x.parentId === t.id);
   const done = subtasks.filter(s => s.done).length + children.filter(x => x.status === 'done').length;
   const total = subtasks.length + children.length;
-  return `<article class="task-card${fresh ? ' is-new' : ''}" data-id="${escapeHtml(t.id)}"><div class="card-top"><span class="type-badge ${t.type}">${typeLabel(t)}</span><span class="priority ${t.priority}" title="${t.priority} priority"></span></div><h3>${escapeHtml(t.title)}</h3><p>${escapeHtml(t.description)}</p><div class="card-bottom"><span class="card-id">${escapeHtml(t.id)}</span><div class="card-meta">${total ? `<span class="subtask-chip">□ ${done}/${total}</span>` : ''}<span class="${t.due && t.status !== 'done' ? 'due-soon' : ''}">${formatDate(t.due)}</span></div></div></article>`;
+  return `<article class="task-card${fresh ? ' is-new' : ''}" data-id="${escapeHtml(t.id)}"><div class="card-top"><span class="type-badge ${t.type}">${typeLabel(t)}</span><span class="priority ${t.priority}" title="${t.priority} priority"></span></div><h3>${escapeHtml(t.title)}</h3><p>${escapeHtml(t.description)}</p>${tagRow(t)}<div class="card-bottom"><span class="card-id">${escapeHtml(t.id)}</span><div class="card-meta">${total ? `<span class="subtask-chip">□ ${done}/${total}</span>` : ''}<span class="${t.due && t.status !== 'done' ? 'due-soon' : ''}">${formatDate(t.due)}</span></div></div></article>`;
 }
 
 function renderBoard(list) {
@@ -474,18 +485,24 @@ async function decideBoardRequest(id, decision) {
 
 function render() {
   renderBoardRequests();
+  renderSprintFilter();
+  renderViewPicker();
   renderWorkspaceControls();
   const list = visibleTasks();
   renderStats();
   document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   $('#boardGrid').hidden = view !== 'board';
   $('#listView').hidden = view !== 'list';
+  $('#dashboardView').hidden = view !== 'dashboard';
   $('#recentView').hidden = view !== 'recent';
   $('#agentView').hidden = view !== 'agent';
   $('#docsView').hidden = view !== 'docs';
-  $('#viewTitle').textContent = { board: 'Product board', list: 'List', recent: 'Recent changes', agent: 'Agent runs', docs: 'Project docs' }[view];
+  $('#viewTitle').textContent = view === 'dashboard'
+    ? (dashboardScope === 'workspace' ? `${currentWorkspace()?.name || 'Workspace'} dashboard` : 'Dashboard')
+    : { board: 'Product board', list: 'List', recent: 'Recent changes', agent: 'Agent runs', docs: 'Project docs' }[view];
   if (view === 'board') renderBoard(list);
   if (view === 'list') renderList(list);
+  if (view === 'dashboard') renderDashboard();
   if (view === 'recent') renderRecent(list);
   if (view === 'agent') renderAgent();
   if (view === 'docs') {
@@ -503,10 +520,503 @@ function render() {
 
 function setView(next) {
   view = next;
+  activeCustomView = null;
   render();
+  if (next === 'dashboard') loadDashboard();
 }
 
 // ---- drawer ----------------------------------------------------------------
+
+// ---- saved views -----------------------------------------------------------
+// A saved view is a list or board with its filters already applied, for example one sprint. The
+// sidebar dropdown lists the board's views. Choosing one applies its layout and filters. The
+// filters can still be changed, and "Save view" updates the view or saves a new one.
+
+async function loadViews() {
+  if (!remoteMode) {
+    customViews = [];
+    return;
+  }
+  try {
+    const result = await apiRequest(`/api/views?workspace=${enc(workspace)}`);
+    customViews = result.views;
+  } catch {
+    customViews = [];
+  }
+}
+
+function renderViewPicker() {
+  const select = $('#viewPicker');
+  if (!select) return;
+  if (activeCustomView && !customViews.some(v => v.id === activeCustomView)) activeCustomView = null;
+  const placeholder = customViews.length ? 'Choose a view…' : 'No saved views yet';
+  select.innerHTML = `<option value="">${placeholder}</option>${customViews.map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`).join('')}`;
+  select.value = activeCustomView ? String(activeCustomView) : '';
+  $('#deleteView').hidden = !activeCustomView;
+  $('#saveView').textContent = activeCustomView ? 'Update view' : 'Save view…';
+}
+
+function applyCustomView(id) {
+  const found = customViews.find(v => v.id === Number(id));
+  if (!found) return;
+  filters = {
+    priority: found.filters.priority || '',
+    type: found.filters.type || '',
+    status: found.filters.status || '',
+    tag: found.filters.tag || '',
+    sprint: found.filters.sprint || '',
+  };
+  syncFilterUI();
+  activeCustomView = found.id;
+  view = found.layout === 'list' ? 'list' : 'board';
+  render();
+}
+
+async function saveCurrentView() {
+  if (!remoteMode) {
+    alert('Saved views need the desktop app and its local API.');
+    return;
+  }
+  const layout = view === 'list' ? 'list' : 'board';
+  const saved = { priority: filters.priority, type: filters.type, status: filters.status, tag: filters.tag, sprint: filters.sprint };
+  try {
+    if (activeCustomView) {
+      const current = customViews.find(v => v.id === activeCustomView);
+      if (!confirm(`Update "${current?.name || 'this view'}" with the current layout and filters?`)) return;
+      await apiRequest(`/api/views/${enc(activeCustomView)}`, { method: 'PATCH', body: JSON.stringify({ layout, filters: saved }) });
+    } else {
+      const name = (prompt('Name for this view, for example "Sprint 4, high priority"') || '').trim();
+      if (!name) return;
+      const result = await apiRequest('/api/views', { method: 'POST', body: JSON.stringify({ workspace, name, layout, filters: saved }) });
+      activeCustomView = result.view.id;
+    }
+    await loadViews();
+    renderViewPicker();
+    render();
+  } catch (error) {
+    alert(`Could not save the view: ${errorText(error)}`);
+  }
+}
+
+async function deleteActiveView() {
+  if (!activeCustomView) return;
+  const current = customViews.find(v => v.id === activeCustomView);
+  if (!confirm(`Delete the view "${current?.name || ''}"? Its tasks stay where they are.`)) return;
+  try {
+    await apiRequest(`/api/views/${enc(activeCustomView)}`, { method: 'DELETE' });
+    activeCustomView = null;
+    await loadViews();
+    renderViewPicker();
+    render();
+  } catch (error) {
+    alert(`Could not delete the view: ${errorText(error)}`);
+  }
+}
+
+$('#viewPicker').onchange = e => {
+  if (e.target.value) applyCustomView(e.target.value);
+  else { activeCustomView = null; render(); }
+};
+$('#saveView').onclick = saveCurrentView;
+$('#deleteView').onclick = deleteActiveView;
+
+// ---- sprints ---------------------------------------------------------------
+// A sprint is a time box on one board, with a start and an end. One sprint runs at a time in a
+// board. Tasks join a sprint from the task form, and the board filters by sprint. The default
+// length comes from the board; a length or end date can be typed for a single sprint.
+
+async function loadSprints() {
+  if (!remoteMode) {
+    sprints = [];
+    return;
+  }
+  try {
+    const result = await apiRequest(`/api/sprints?workspace=${enc(workspace)}`);
+    sprints = result.sprints;
+  } catch {
+    sprints = [];
+  }
+}
+
+function sprintName(id) {
+  const found = sprints.find(s => s.id === Number(id));
+  return found ? found.name : 'Sprint';
+}
+
+function sprintStatusLabel(status) {
+  return { planned: 'planned', active: 'running', closed: 'closed' }[status] || status;
+}
+
+function renderSprintFilter() {
+  const select = $('#filterSprint');
+  if (!select) return;
+  select.innerHTML = `<option value="">Any</option><option value="none">No sprint</option>${sprints.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('')}`;
+  select.value = filters.sprint;
+}
+
+function renderSprintSelect() {
+  const select = $('#taskSprint');
+  if (!select) return;
+  select.innerHTML = `<option value="">No sprint</option>${sprints.map(s => `<option value="${s.id}">${escapeHtml(s.name)} (${escapeHtml(sprintStatusLabel(s.status))})</option>`).join('')}`;
+}
+
+function sprintRow(s) {
+  const actions = [];
+  if (s.status === 'planned') actions.push(`<button type="button" class="button quiet" data-sprint-action="start" data-sprint-id="${s.id}">Start</button>`);
+  if (s.status === 'active') actions.push(`<button type="button" class="button quiet" data-sprint-action="close" data-sprint-id="${s.id}">Close</button>`);
+  actions.push(`<button type="button" class="button quiet danger" data-sprint-action="delete" data-sprint-id="${s.id}">Delete</button>`);
+  return `<div class="sprint-row">
+      <div>
+        <strong>${escapeHtml(s.name)}</strong> <span class="sprint-status ${escapeHtml(s.status)}">${escapeHtml(sprintStatusLabel(s.status))}</span>
+        <div class="sprint-meta">${formatDate(s.startDate)} to ${formatDate(s.endDate)} · ${s.tasks} task${s.tasks === 1 ? '' : 's'}</div>
+      </div>
+      <div class="sprint-actions">${actions.join('')}</div>
+    </div>`;
+}
+
+function renderSprintManager() {
+  $('#sprintList').innerHTML = sprints.length
+    ? sprints.map(sprintRow).join('')
+    : '<div class="empty-note">No sprints yet. Create one below.</div>';
+}
+
+function openSprintManager() {
+  if (!remoteMode) {
+    alert('Sprints need the desktop app and its local API.');
+    return;
+  }
+  renderSprintManager();
+  $('#sprintDaysForm').elements.days.value = currentWorkspace()?.sprintDays || 14;
+  $('#sprintForm').elements.startDate.value = todayStr();
+  $('#sprintBackdrop').classList.add('open');
+}
+
+function closeSprintManager() {
+  $('#sprintBackdrop').classList.remove('open');
+}
+
+async function sprintAction(id, action) {
+  try {
+    if (action === 'delete') {
+      if (!confirm('Delete this sprint? Its tasks stay on the board, out of the sprint.')) return;
+      await apiRequest(`/api/sprints/${enc(id)}`, { method: 'DELETE' });
+    } else {
+      await apiRequest(`/api/sprints/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ status: action === 'start' ? 'active' : 'closed' }) });
+    }
+    await loadSprints();
+    renderSprintManager();
+    render();
+  } catch (error) {
+    alert(`Could not ${action} the sprint: ${errorText(error)}`);
+  }
+}
+
+async function createSprintFromForm(event) {
+  event.preventDefault();
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  const body = {
+    workspace,
+    name: (data.name || '').trim(),
+    startDate: data.startDate || undefined,
+    lengthDays: data.lengthDays ? Number(data.lengthDays) : undefined,
+    endDate: data.endDate || undefined,
+  };
+  try {
+    await apiRequest('/api/sprints', { method: 'POST', body: JSON.stringify(body) });
+    form.reset();
+    form.elements.startDate.value = todayStr();
+    await loadSprints();
+    renderSprintManager();
+    render();
+  } catch (error) {
+    alert(`Could not create the sprint: ${errorText(error)}`);
+  }
+}
+
+async function saveSprintDays(event) {
+  event.preventDefault();
+  const days = Number(event.target.elements.days.value);
+  try {
+    await apiRequest(`/api/workspaces/${enc(workspace)}/sprint-days`, { method: 'PUT', body: JSON.stringify({ days }) });
+    await loadWorkspaces();
+    render();
+  } catch (error) {
+    alert(`Could not save the default length: ${errorText(error)}`);
+  }
+}
+
+$('#openSprints').onclick = openSprintManager;
+$('#closeSprints').onclick = closeSprintManager;
+$('#sprintBackdrop').addEventListener('click', e => { if (e.target.id === 'sprintBackdrop') closeSprintManager(); });
+$('#sprintForm').onsubmit = createSprintFromForm;
+$('#sprintDaysForm').onsubmit = saveSprintDays;
+
+// ---- dashboard -------------------------------------------------------------
+// The first screen. "All boards" covers every workspace; a workspace's own dashboard opens from its
+// name at the top left. Numbers come from the API, and the page redraws on each refresh.
+
+async function loadDashboard() {
+  if (!remoteMode) return;
+  const scope = dashboardScope === 'workspace' ? workspace : 'all';
+  try {
+    dashboardData = await apiRequest(`/api/dashboard?workspace=${enc(scope)}`);
+  } catch (error) {
+    dashboardData = { error: errorText(error) };
+  }
+  if (view === 'dashboard') renderDashboard();
+}
+
+function openWorkspaceDashboard(id) {
+  if (id !== workspace) setWorkspace(id);
+  dashboardScope = 'workspace';
+  setView('dashboard');
+}
+
+// Opens a task in whichever board it belongs to, switching boards first when needed.
+async function openTaskAnywhere(id, workspaceId) {
+  if (workspaceId && workspaceId !== workspace) {
+    setWorkspace(workspaceId, false);
+    await loadRemoteTasks();
+  }
+  setView('board');
+  openDrawer(id);
+}
+
+function dashboardBoardCard(b) {
+  const details = [
+    `${b.active} active`,
+    `${b.highPriority} high`,
+    `${b.dueSoon} due soon`,
+    b.overdue ? `${b.overdue} overdue` : '',
+    b.blocked ? `${b.blocked} blocked` : '',
+  ].filter(Boolean).join(' · ');
+  return `<button type="button" class="dash-board" data-open-board="${escapeHtml(b.id)}">
+      <strong>${escapeHtml(b.name)}</strong>
+      <span class="dash-board-meta">${escapeHtml(details)}</span>
+      <small>${b.lastUpdated ? `Updated ${relativeTime(b.lastUpdated)}` : 'No changes yet'}</small>
+    </button>`;
+}
+
+function renderDashboard() {
+  const box = $('#dashboardView');
+  if (!box) return;
+  if (!remoteMode) {
+    box.innerHTML = '<div class="empty-note">The dashboard needs the desktop app and its local API.</div>';
+    return;
+  }
+  if (!dashboardData) {
+    box.innerHTML = '<div class="empty-note">Loading the dashboard…</div>';
+    return;
+  }
+  if (dashboardData.error) {
+    box.innerHTML = `<div class="empty-note">Could not load the dashboard: ${escapeHtml(dashboardData.error)}</div>`;
+    return;
+  }
+  const single = dashboardScope === 'workspace';
+  const boards = dashboardData.workspaces || [];
+  const totals = dashboardData.totals;
+  const nameOf = id => (boards.find(b => b.id === id) || {}).name || id;
+  const byStatus = { backlog: 0, progress: 0, review: 0, done: 0 };
+  for (const b of boards) for (const key of Object.keys(byStatus)) byStatus[key] += b.byStatus[key] || 0;
+  const labels = { backlog: 'Backlog', progress: 'In progress', review: 'In review', done: 'Done' };
+
+  const stat = (label, value) => `<div class="stat-card"><div><span>${label}</span><strong>${value}</strong></div></div>`;
+  const dueLabel = totals.overdue ? `Due in 7 days <em class="warning">${totals.overdue} overdue</em>` : 'Due in 7 days';
+  const pills = Object.entries(byStatus).map(([key, n]) => `<span class="dash-pill">${labels[key]}<b>${n}</b></span>`).join('');
+
+  const upcoming = dashboardData.upcoming || [];
+  const upcomingRows = upcoming.length
+    ? upcoming.map(u => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(u.id)}" data-workspace="${escapeHtml(u.workspace)}">
+        <span><strong>${escapeHtml(u.id)}</strong>${escapeHtml(u.title)}</span>
+        <small>${formatDate(u.due)}${single ? '' : ` · ${escapeHtml(u.workspaceName)}`}</small>
+      </button>`).join('')
+    : '<div class="empty-note">Nothing due in the next 7 days.</div>';
+
+  const recent = dashboardData.recent || [];
+  const recentRows = recent.length
+    ? recent.map(h => `<button type="button" class="dash-row" data-dash-task="${escapeHtml(h.taskId)}" data-workspace="${escapeHtml(h.taskWorkspace)}">
+        <span><strong>${escapeHtml(h.taskId)}</strong>${escapeHtml(h.taskTitle)}${single ? '' : ` · ${escapeHtml(nameOf(h.taskWorkspace))}`}</span>
+        <small>${escapeHtml(h.summary || h.action)} · ${relativeTime(h.at)}</small>
+      </button>`).join('')
+    : '<div class="empty-note">No changes recorded yet.</div>';
+
+  box.innerHTML = `
+    <div class="stats-row">
+      ${stat('Active work', totals.active)}
+      ${stat('High priority', totals.highPriority)}
+      ${stat(dueLabel, totals.dueSoon)}
+      ${stat('Blocked', totals.blocked)}
+    </div>
+    <div class="dash-status">${pills}</div>
+    ${single ? '' : `<section class="dash-section">
+      <div class="section-heading"><span>Workspaces</span><span>${boards.length}</span></div>
+      <div class="dash-boards">${boards.map(dashboardBoardCard).join('')}</div>
+    </section>`}
+    <div class="dash-columns">
+      <section class="dash-section">
+        <div class="section-heading"><span>Due in the next 7 days</span><span>${upcoming.length}</span></div>
+        <div class="dash-list">${upcomingRows}</div>
+      </section>
+      <section class="dash-section">
+        <div class="section-heading"><span>Recent activity</span><span>${recent.length}</span></div>
+        <div class="dash-list">${recentRows}</div>
+      </section>
+    </div>`;
+}
+
+// ---- tags and suggested model ----------------------------------------------
+// Tags are labels; "important" and "on hold" have their own toggles in the drawer.
+// The suggested model is advice for whichever agent picks the task up.
+
+function tagLabel(tag) {
+  return { important: 'Important', 'on hold': 'On hold' }[tag] || tag;
+}
+
+function tagClass(tag) {
+  return tag.replace(/\s+/g, '-');
+}
+
+function tagRow(t) {
+  const tags = t.tags || [];
+  if (!tags.length && !t.suggestedModel && !t.sprint) return '';
+  return `<div class="tag-row">${t.sprint ? `<span class="tag-chip sprint-chip">${escapeHtml(sprintName(t.sprint))}</span>` : ''}${tags.map(tag => `<span class="tag-chip ${tagClass(tag)}">${escapeHtml(tagLabel(tag))}</span>`).join('')}${t.suggestedModel ? `<span class="model-suggest" title="Suggested model. Advisory only.">${escapeHtml(t.suggestedModel)}</span>` : ''}</div>`;
+}
+
+function renderDrawerTags(t) {
+  const box = $('#drawerTags');
+  if (!box) return;
+  const tags = t.tags || [];
+  const toggles = ['important', 'on hold'].map(tag => {
+    const on = tags.includes(tag);
+    return `<button type="button" class="tag-toggle ${tagClass(tag)}${on ? ' on' : ''}" data-toggle-tag="${escapeHtml(tag)}" aria-pressed="${on}">${on ? '✓ ' : ''}${escapeHtml(tagLabel(tag))}</button>`;
+  }).join('');
+  const others = tags.filter(tag => !['important', 'on hold'].includes(tag))
+    .map(tag => `<span class="tag-chip">${escapeHtml(tag)}</span>`).join('');
+  const sprintChip = t.sprint ? `<span class="tag-chip sprint-chip">${escapeHtml(sprintName(t.sprint))}</span>` : '';
+  const model = t.suggestedModel
+    ? `<span class="model-suggest" title="Suggested model. Advisory only.">Suggested model: <code>${escapeHtml(t.suggestedModel)}</code></span>`
+    : '';
+  box.innerHTML = `${sprintChip}${toggles}${others}${model}`;
+}
+
+async function toggleTag(id, tag) {
+  const t = tasks.find(x => x.id === id);
+  if (!t) return;
+  const current = t.tags || [];
+  const next = current.includes(tag) ? current.filter(x => x !== tag) : [...current, tag];
+  try {
+    const saved = remoteMode
+      ? await apiRequest(`/api/tasks/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ tags: next }) })
+      : null;
+    Object.assign(t, saved || { tags: next }, { updated: new Date().toISOString() });
+    syncOk = true;
+    persist();
+    render();
+    renderDrawerTags(t);
+    loadHistory(id);
+  } catch (error) {
+    alert(`Could not change the tag: ${error.message}`);
+  }
+}
+
+// ---- relationships, links and comments ------------------------------------------
+
+// Links open in the person's browser. In the desktop app that is the system browser, and the
+// app window stays where it is.
+function openLink(url) {
+  if (tauriCore) {
+    return tauriCore.invoke('open_external', { url }).catch(error => alert(`Could not open the link: ${errorText(error)}`));
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function taskChip(id) {
+  const other = tasks.find(x => x.id === id);
+  const label = other ? `${other.id} · ${other.title}` : `${id} (not found)`;
+  return `<button type="button" class="task-chip${other && other.status === 'done' ? ' done' : ''}" data-open-task="${escapeHtml(id)}">${escapeHtml(label)}</button>`;
+}
+
+function linkItems(urls) {
+  return urls.map(url => `<a class="ext-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url.replace(/^https?:\/\//i, ''))}</a>`).join('');
+}
+
+// Subtasks relate to their parent automatically: the parent appears under "Part of".
+function renderDrawerRelations(t) {
+  const box = $('#drawerRelations');
+  if (!box) return;
+  const blockedBy = t.blockedBy || [];
+  const relatesTo = t.relatesTo || [];
+  const blocks = tasks.filter(x => (x.blockedBy || []).includes(t.id)).map(x => x.id);
+  const group = (label, body) => body
+    ? `<div class="rel-group"><div class="rel-label">${label}</div><div class="rel-items">${body}</div></div>`
+    : '';
+  const pickUp = t.standalone === false
+    ? `<div class="pickup-note"><strong>Can't be picked up on its own.</strong> ${escapeHtml(t.standaloneNote || 'No reason given.')}</div>`
+    : '';
+  const links = (t.links || []).length
+    ? `<div class="rel-group"><div class="rel-label">Links</div><div class="rel-items link-items">${linkItems(t.links)}</div></div>`
+    : '';
+  const body = pickUp
+    + group('Part of', t.parentId ? taskChip(t.parentId) : '')
+    + group('Blocked by', blockedBy.map(taskChip).join(''))
+    + group('Blocks', blocks.map(taskChip).join(''))
+    + group('Relates to', relatesTo.map(taskChip).join(''))
+    + links;
+  box.innerHTML = body ? `<div class="drawer-section relations">${body}</div>` : '';
+}
+
+async function loadComments(id) {
+  const list = $('#commentList');
+  const form = $('#commentForm');
+  if (!list || !form) return;
+  if (!remoteMode) {
+    list.innerHTML = '<div class="history-empty">Comments need the desktop app and its local API.</div>';
+    form.hidden = true;
+    return;
+  }
+  form.hidden = false;
+  list.innerHTML = '<div class="history-empty">Loading…</div>';
+  try {
+    const result = await apiRequest(`/api/tasks/${enc(id)}/comments`);
+    if (activeTaskId !== id) return;
+    renderComments(result.comments);
+  } catch (error) {
+    if (activeTaskId === id) list.innerHTML = '<div class="history-empty">Could not load comments.</div>';
+  }
+}
+
+function renderComments(comments) {
+  $('#commentCount').textContent = comments.length ? String(comments.length) : '';
+  $('#commentList').innerHTML = comments.length
+    ? comments.map(c => `
+      <div class="comment">
+        <div class="comment-who">
+          <strong>${escapeHtml(c.actorName)}</strong>
+          ${c.actorModel ? `<span class="history-model">${escapeHtml(c.actorModel)}</span>` : ''}
+          <span class="history-kind ${escapeHtml(c.actorKind)}">${escapeHtml(c.actorKind)}</span>
+          <small>${formatDateTime(c.at)}</small>
+        </div>
+        <div class="comment-body">${renderMarkdown(c.body)}</div>
+      </div>`).join('')
+    : '<div class="history-empty">No comments yet.</div>';
+}
+
+async function postComment(event) {
+  event.preventDefault();
+  const form = event.target;
+  const body = form.elements.body.value.trim();
+  if (!body || !activeTaskId) return;
+  try {
+    await apiRequest(`/api/tasks/${enc(activeTaskId)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+    form.reset();
+    await loadComments(activeTaskId);
+  } catch (error) {
+    alert(`Could not post the comment: ${errorText(error)}`);
+  }
+}
+
+$('#commentForm').onsubmit = postComment;
 
 function openDrawer(id) {
   const t = tasks.find(x => x.id === id);
@@ -522,9 +1032,12 @@ function openDrawer(id) {
   $('#drawerType').textContent = typeLabel(t);
   $('#drawerId').textContent = t.id;
   $('#drawerTitle').textContent = t.title;
-  $('#drawerDescription').textContent = t.description || 'No description yet.';
+  $('#drawerDescription').innerHTML = t.description ? renderMarkdown(t.description) : '<p>No description yet.</p>';
+  renderDrawerRelations(t);
+  loadComments(id);
   $('#drawerMeta').innerHTML = `<span class="meta-pill">${t.priority} priority</span><span class="meta-pill">${statusLabel[t.status] || t.status}</span><span class="meta-pill">Due ${formatDate(t.due)}</span>`;
   $('#drawerUpdated').textContent = formatDateTime(t.updated);
+  renderDrawerTags(t);
   renderDrawerDocs(t);
   loadHistory(id);
   const done = all.filter(s => s.done).length;
@@ -586,6 +1099,15 @@ function openModal(id = null, status = 'backlog') {
   const form = $('#taskForm');
   form.reset();
   form.elements.docs.value = t ? (t.docs || []).join(', ') : '';
+  form.elements.tags.value = t ? (t.tags || []).join(', ') : '';
+  form.elements.blockedBy.value = t ? (t.blockedBy || []).join(', ') : '';
+  form.elements.relatesTo.value = t ? (t.relatesTo || []).join(', ') : '';
+  form.elements.links.value = t ? (t.links || []).join(', ') : '';
+  renderSprintSelect();
+  form.elements.sprint.value = t && t.sprint ? String(t.sprint) : '';
+  form.elements.standaloneNote.value = t ? (t.standaloneNote || '') : '';
+  form.elements.standalone.checked = t ? t.standalone !== false : true;
+  form.elements.suggestedModel.value = t ? (t.suggestedModel || '') : '';
   if (t) {
     for (const key of ['title', 'type', 'priority', 'status', 'due', 'description']) form.elements[key].value = t[key] || '';
   } else {
@@ -603,6 +1125,14 @@ async function saveTask(event) {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
   data.docs = parseDocList(data.docs);
+  data.tags = parseDocList(data.tags).map(tag => tag.toLowerCase());
+  data.suggestedModel = (data.suggestedModel || '').trim();
+  data.blockedBy = parseDocList(data.blockedBy);
+  data.relatesTo = parseDocList(data.relatesTo);
+  data.links = parseDocList(data.links);
+  data.standalone = event.target.elements.standalone.checked;
+  data.standaloneNote = (data.standaloneNote || '').trim();
+  data.sprint = data.sprint ? Number(data.sprint) : null;
   try {
     if (editingId) {
       const t = tasks.find(x => x.id === editingId);
@@ -1134,7 +1664,9 @@ function inlineMarkdown(text) {
   return escapeHtml(text)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (m, pre, url) => `${pre}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
 
 // A small Markdown renderer: headings, lists, fenced code, paragraphs, and inline code and emphasis.
@@ -1219,6 +1751,19 @@ async function dismissSuggestion() {
   }
 }
 
+// HTML pages in the project folder were written by agents, so they are never run as part of
+// Clankban. They are shown in a sandboxed frame: sandbox="" allows no scripts, no forms, and no
+// access to the app. A content policy inside the frame also blocks outside requests.
+function isHtmlDoc(path) {
+  return /\.html?$/i.test(path || '');
+}
+
+function renderHtmlPage(html) {
+  const policy = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data:; style-src \'unsafe-inline\'; font-src data:">';
+  const page = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, match => match + policy) : policy + html;
+  return `<iframe class="doc-frame" sandbox="" title="Project page" srcdoc="${escapeHtml(page)}"></iframe>`;
+}
+
 function renderDocs(force = false) {
   renderSuggestion();
   const box = $('#docsBody');
@@ -1278,7 +1823,7 @@ function renderDocs(force = false) {
       </aside>
       <article class="docs-reader">
         ${selectedDoc
-          ? `<div class="docs-reader-path">${escapeHtml(selectedDoc)}</div>${renderMarkdown(docBody)}`
+          ? `<div class="docs-reader-path">${escapeHtml(selectedDoc)}</div>${isHtmlDoc(selectedDoc) ? renderHtmlPage(docBody) : renderMarkdown(docBody)}`
           : '<div class="empty-note">Pick a document to read it.</div>'}
       </article>
     </div>`;
@@ -1357,6 +1902,7 @@ function closeTop() {
   if (isOpen('#paletteBackdrop')) return closePalette();
   if (isOpen('#helpBackdrop')) return closeHelp();
   if (isOpen('#changelogBackdrop')) return closeNotes();
+  if (isOpen('#sprintBackdrop')) return closeSprintManager();
   if (isOpen('#jsonModalBackdrop')) return $('#jsonModalBackdrop').classList.remove('open');
   if (isOpen('#modalBackdrop')) return closeModal();
   if (isOpen('#taskDrawer')) return closeDrawer();
@@ -1364,7 +1910,12 @@ function closeTop() {
   if (!$('#filterPanel').hidden) toggleFilterPanel(false);
 }
 
-document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
+document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
+  // The sidebar's Dashboard covers every board. A board's own dashboard opens from its name.
+  if (button.dataset.view === 'dashboard') dashboardScope = 'all';
+  setView(button.dataset.view);
+}));
+$('#workspaceCrumb').onclick = () => openWorkspaceDashboard(workspace);
 
 $('#newTask').onclick = () => openModal();
 $('#closeModal').onclick = closeModal;
@@ -1381,6 +1932,8 @@ $('#focusSearch').onclick = () => $('#searchInput').focus();
 $('#filterButton').onclick = () => toggleFilterPanel();
 $('#filterPriority').onchange = e => { filters.priority = e.target.value; render(); };
 $('#filterType').onchange = e => { filters.type = e.target.value; render(); };
+$('#filterTag').onchange = e => { filters.tag = e.target.value; render(); };
+$('#filterSprint').onchange = e => { filters.sprint = e.target.value; render(); };
 $('#filterStatus').onchange = e => { filters.status = e.target.value; render(); };
 $('#clearFilters').onclick = () => { resetFilters(); render(); };
 
@@ -1472,12 +2025,27 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('click', e => {
+  const sprintButton = e.target.closest('[data-sprint-action]');
+  if (sprintButton) return sprintAction(sprintButton.dataset.sprintId, sprintButton.dataset.sprintAction);
+  const dashTask = e.target.closest('[data-dash-task]');
+  if (dashTask) return openTaskAnywhere(dashTask.dataset.dashTask, dashTask.dataset.workspace);
+  const dashBoard = e.target.closest('[data-open-board]');
+  if (dashBoard) return openWorkspaceDashboard(dashBoard.dataset.openBoard);
+  const externalLink = e.target.closest('a[href]');
+  if (externalLink && /^https?:\/\//i.test(externalLink.getAttribute('href'))) {
+    e.preventDefault();
+    return openLink(externalLink.getAttribute('href'));
+  }
+  const openTask = e.target.closest('[data-open-task]');
+  if (openTask) return openDrawer(openTask.dataset.openTask);
   const recentTabButton = e.target.closest('[data-recent-tab]');
   if (recentTabButton) { recentTab = recentTabButton.dataset.recentTab; return render(); }
   const approveBoard = e.target.closest('[data-approve-board]');
   if (approveBoard) return decideBoardRequest(approveBoard.dataset.approveBoard, 'approve');
   const rejectBoard = e.target.closest('[data-reject-board]');
   if (rejectBoard) return decideBoardRequest(rejectBoard.dataset.rejectBoard, 'reject');
+  const tagToggle = e.target.closest('[data-toggle-tag]');
+  if (tagToggle) return toggleTag(activeTaskId, tagToggle.dataset.toggleTag);
   const skillOption = e.target.closest('.skill-option');
   if (skillOption) return selectSkill(skillOption.dataset.skill);
   const cancelButton = e.target.closest('.cancel-run');

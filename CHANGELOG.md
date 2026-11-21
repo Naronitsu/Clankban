@@ -2,6 +2,18 @@
 
 Each release has a section headed `## <version>`. The release script copies that section into the update notes, so write it for the people who will read it.
 
+## 0.4.5 — 2026-11-21
+
+- Tasks have tags. Important and On hold have one-click toggles in the drawer, and the board filters by tag.
+- Tasks can suggest a model for the agent that picks them up. The suggestion is advice only.
+- Project docs include HTML pages an agent generated. They open in a sandbox with no scripts and no outside requests.
+- Tasks can be blocked by, or relate to, other tasks. Subtasks show their parent. A task that cannot be picked up on its own says why. Agents see blocked tasks.
+- Comments on tasks, from people and agents, with the author and model recorded.
+- Task descriptions render Markdown, including code blocks. Related links on a task open in your browser.
+- Dashboard: the app opens on it. It shows totals, each board, upcoming work and recent activity across all boards. Each board has its own dashboard, opened from its name.
+- Sprints: each board has sprints with a default length, a manual length or end date, and one running sprint at a time. Tasks join a sprint, and the board filters by sprint.
+- Saved views: a board or list with filters baked in, chosen from a dropdown in the sidebar.
+
 ## 0.4.4 — 2026-11-21
 
 - Updates come with release notes. Before you install, "What's new" shows the new version's changes. After an update, the first launch shows what changed.

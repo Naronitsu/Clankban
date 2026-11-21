@@ -2,7 +2,7 @@
 //! Keeps the schema, seed data, and normalisation rules of the original Node `server.js`,
 //! so existing `clankban.sqlite` files open unchanged.
 
-use chrono::{Duration, SecondsFormat, Utc};
+use chrono::{Duration, NaiveDate, SecondsFormat, Utc};
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub const DB_FILE: &str = "clankban.sqlite";
 pub const SCHEMA_VERSION: &str = "1.1";
 pub const DEFAULT_WORKSPACE: &str = "default";
 
-const SELECT_COLUMNS: &str = "id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs";
+const SELECT_COLUMNS: &str = "id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs, tags, suggested_model, blocked_by, relates_to, standalone, standalone_note, links, sprint_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Subtask {
@@ -41,6 +41,25 @@ pub struct Task {
     pub workspace: String,
     /// Project documents this task relates to, as paths relative to the project folder.
     pub docs: Vec<String>,
+    /// Labels such as "important" or "on hold". Lowercase, no duplicates.
+    pub tags: Vec<String>,
+    /// A model the person or an agent suggests for this task. Advisory only; empty when none.
+    #[serde(rename = "suggestedModel")]
+    pub suggested_model: String,
+    /// Tasks that must be finished before this one can start.
+    #[serde(rename = "blockedBy")]
+    pub blocked_by: Vec<String>,
+    /// Tasks related to this one, with no order between them.
+    #[serde(rename = "relatesTo")]
+    pub relates_to: Vec<String>,
+    /// False when this task cannot be picked up on its own. `standalone_note` says why.
+    pub standalone: bool,
+    #[serde(rename = "standaloneNote")]
+    pub standalone_note: String,
+    /// Related links. Only http and https addresses are stored.
+    pub links: Vec<String>,
+    /// The sprint this task is in, or none.
+    pub sprint: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,6 +77,9 @@ pub struct Workspace {
     /// Who proposed the folder, for example "claude-code 2.1.0 (claude-haiku-5-5)".
     #[serde(rename = "suggestedBy")]
     pub suggested_by: Option<String>,
+    /// The default length of a new sprint on this board, in days.
+    #[serde(rename = "sprintDays")]
+    pub sprint_days: i64,
 }
 
 /// Who made a change. `kind` is "human" (the board), "agent" (an MCP client), or "api".
@@ -161,6 +183,173 @@ fn read_run(conn: &Connection, id: i64) -> Result<Option<RunRequest>, ApiError> 
     Ok(run)
 }
 
+/// The filters a view can save. Anything else in a request is dropped.
+const VIEW_FILTER_KEYS: &[&str] = &["priority", "type", "status", "tag", "sprint"];
+
+/// A saved layout for one board: a list or a board, with filters already applied.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct View {
+    pub id: i64,
+    pub workspace: String,
+    pub name: String,
+    /// `board` or `list`.
+    pub layout: String,
+    /// Filter values by name: priority, type, status, tag, and sprint (a sprint id, or "none").
+    pub filters: std::collections::BTreeMap<String, String>,
+}
+
+const VIEW_COLUMNS: &str = "id, workspace_id, name, layout, filters";
+
+fn row_to_view(row: &Row) -> rusqlite::Result<View> {
+    let raw: String = row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "{}".into());
+    Ok(View {
+        id: row.get(0)?,
+        workspace: row.get(1)?,
+        name: row.get(2)?,
+        layout: row.get(3)?,
+        filters: serde_json::from_str(&raw).unwrap_or_default(),
+    })
+}
+
+/// The filters a request asks to save, keeping only the known keys with non-empty text values.
+fn view_filters(input: Option<&Value>) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(Value::Object(map)) = input {
+        for key in VIEW_FILTER_KEYS {
+            if let Some(value) = map.get(*key).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty()) {
+                out.insert((*key).to_string(), value.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn view_name(text: Option<&str>) -> Result<String, ApiError> {
+    let name = text.unwrap_or("").trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("view name is required".into()));
+    }
+    if name.chars().count() > 60 {
+        return Err(ApiError::BadRequest("view names are limited to 60 characters".into()));
+    }
+    Ok(name.to_string())
+}
+
+fn view_layout(text: Option<&str>) -> Result<String, ApiError> {
+    match text.map(str::trim) {
+        Some(layout @ ("board" | "list")) => Ok(layout.to_string()),
+        _ => Err(ApiError::BadRequest("a view shows a board or a list".into())),
+    }
+}
+
+/// The default and the largest sprint length, in days.
+pub const DEFAULT_SPRINT_DAYS: i64 = 14;
+const MAX_SPRINT_DAYS: i64 = 90;
+
+/// A time-boxed run of work on one board. One sprint at a time is running in a board.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Sprint {
+    pub id: i64,
+    pub workspace: String,
+    pub name: String,
+    #[serde(rename = "startDate")]
+    pub start_date: String,
+    #[serde(rename = "endDate")]
+    pub end_date: String,
+    /// `planned`, `active` (running), or `closed`.
+    pub status: String,
+    /// How many tasks are in this sprint.
+    pub tasks: i64,
+}
+
+const SPRINT_COLUMNS: &str =
+    "s.id, s.workspace_id, s.name, s.start_date, s.end_date, s.status, (SELECT COUNT(*) FROM tasks t WHERE t.sprint_id = s.id)";
+
+fn row_to_sprint(row: &Row) -> rusqlite::Result<Sprint> {
+    Ok(Sprint {
+        id: row.get(0)?,
+        workspace: row.get(1)?,
+        name: row.get(2)?,
+        start_date: row.get(3)?,
+        end_date: row.get(4)?,
+        status: row.get(5)?,
+        tasks: row.get(6)?,
+    })
+}
+
+fn read_sprint(conn: &Connection, id: i64) -> Result<Option<Sprint>, ApiError> {
+    Ok(conn
+        .query_row(&format!("SELECT {SPRINT_COLUMNS} FROM sprints s WHERE s.id = ?1"), [id], row_to_sprint)
+        .optional()?)
+}
+
+/// A calendar day written as YYYY-MM-DD.
+fn parse_day(text: &str) -> Result<NaiveDate, ApiError> {
+    NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d")
+        .map_err(|_| ApiError::BadRequest(format!("dates must look like 2026-12-01, not {text}")))
+}
+
+/// The last day of a sprint. A typed end date wins; otherwise the typed length, otherwise the board's default.
+fn resolve_sprint_end(
+    conn: &Connection,
+    workspace: &str,
+    start: NaiveDate,
+    length_days: Option<i64>,
+    end_text: Option<&str>,
+) -> Result<NaiveDate, ApiError> {
+    if let Some(text) = end_text.map(str::trim).filter(|t| !t.is_empty()) {
+        let end = parse_day(text)?;
+        if end < start {
+            return Err(ApiError::BadRequest("the end date is before the start date".into()));
+        }
+        if (end - start).num_days() + 1 > MAX_SPRINT_DAYS {
+            return Err(ApiError::BadRequest(format!("sprints can be at most {MAX_SPRINT_DAYS} days")));
+        }
+        return Ok(end);
+    }
+    let days = match length_days {
+        Some(days) => days,
+        None => conn
+            .query_row("SELECT sprint_days FROM workspaces WHERE id = ?1", [workspace], |row| row.get::<_, i64>(0))
+            .optional()?
+            .unwrap_or(DEFAULT_SPRINT_DAYS),
+    };
+    if !(1..=MAX_SPRINT_DAYS).contains(&days) {
+        return Err(ApiError::BadRequest(format!("sprint length must be between 1 and {MAX_SPRINT_DAYS} days")));
+    }
+    Ok(start + Duration::days(days - 1))
+}
+
+/// A note on a task, from a person or an agent.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Comment {
+    pub id: i64,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    pub at: String,
+    #[serde(rename = "actorKind")]
+    pub actor_kind: String,
+    #[serde(rename = "actorName")]
+    pub actor_name: String,
+    #[serde(rename = "actorModel")]
+    pub actor_model: String,
+    pub body: String,
+}
+
+const COMMENT_COLUMNS: &str = "id, task_id, at, actor_kind, actor_name, actor_model, body";
+
+fn row_to_comment(row: &Row) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        at: row.get(2)?,
+        actor_kind: row.get(3)?,
+        actor_name: row.get(4)?,
+        actor_model: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        body: row.get(6)?,
+    })
+}
+
 /// A request from an agent for a new board. Pending until a person approves or rejects it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct BoardRequest {
@@ -230,6 +419,8 @@ pub struct RecentHistoryEntry {
     pub entry: HistoryEntry,
     #[serde(rename = "taskTitle")]
     pub task_title: String,
+    #[serde(rename = "taskWorkspace")]
+    pub task_workspace: String,
 }
 
 fn row_to_history(row: &Row) -> rusqlite::Result<HistoryEntry> {
@@ -315,7 +506,86 @@ fn row_to_task(row: &Row) -> rusqlite::Result<Task> {
             .get::<_, Option<String>>(12)?
             .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
             .unwrap_or_default(),
+        tags: row
+            .get::<_, Option<String>>(13)?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default(),
+        suggested_model: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+        blocked_by: json_list(row.get::<_, Option<String>>(15)?),
+        relates_to: json_list(row.get::<_, Option<String>>(16)?),
+        standalone: row.get::<_, Option<i64>>(17)?.unwrap_or(1) != 0,
+        standalone_note: row.get::<_, Option<String>>(18)?.unwrap_or_default(),
+        links: json_list(row.get::<_, Option<String>>(19)?),
+        sprint: row.get::<_, Option<i64>>(20)?,
     })
+}
+
+/// A JSON array stored in a text column, read back as a list. Bad or missing data reads as empty.
+fn json_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok()).unwrap_or_default()
+}
+
+/// Links must be plain http or https addresses. Anything else is refused, so a link can never
+/// open a file, a script, or another scheme.
+fn normalise_links(merged: &Map<String, Value>) -> Result<Vec<String>, ApiError> {
+    let Some(Value::Array(items)) = merged.get("links") else {
+        return Ok(Vec::new());
+    };
+    let mut links: Vec<String> = Vec::new();
+    for item in items.iter().filter_map(Value::as_str) {
+        let link = item.trim();
+        if link.is_empty() {
+            continue;
+        }
+        let lower = link.to_ascii_lowercase();
+        let web = lower.starts_with("http://") || lower.starts_with("https://");
+        if !web || link.len() > 2000 || link.contains(char::is_whitespace) {
+            return Err(ApiError::BadRequest(format!("links must be http or https addresses: {link}")));
+        }
+        if !links.iter().any(|known| known == link) {
+            links.push(link.to_string());
+        }
+    }
+    Ok(links)
+}
+
+/// The JSON text for the relationship and link columns.
+fn relation_columns(task: &Task) -> Result<(String, String, String), ApiError> {
+    let encode = |list: &Vec<String>| serde_json::to_string(list).map_err(|e| ApiError::Internal(e.to_string()));
+    Ok((encode(&task.blocked_by)?, encode(&task.relates_to)?, encode(&task.links)?))
+}
+
+/// Blocking and relating links must point at tasks that exist.
+fn check_references(conn: &Connection, task: &Task) -> Result<(), ApiError> {
+    for other in task.blocked_by.iter().chain(task.relates_to.iter()) {
+        if read_one(conn, other)?.is_none() {
+            return Err(ApiError::BadRequest(format!("Unknown task: {other}")));
+        }
+    }
+    if let Some(sprint) = task.sprint {
+        let board: Option<String> = conn
+            .query_row("SELECT workspace_id FROM sprints WHERE id = ?1", [sprint], |row| row.get(0))
+            .optional()?;
+        match board {
+            Some(board) if board == task.workspace => {}
+            Some(_) => return Err(ApiError::BadRequest("that sprint belongs to another board".into())),
+            None => return Err(ApiError::BadRequest(format!("Unknown sprint: {sprint}"))),
+        }
+    }
+    Ok(())
+}
+
+/// Tags are short labels. They are trimmed, lowercased, de-duplicated, and capped in count and length.
+fn normalise_tags(items: impl Iterator<Item = String>) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for raw in items {
+        let tag: String = raw.trim().to_lowercase().chars().take(32).collect();
+        if !tag.is_empty() && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags.truncate(12);
+    tags
 }
 
 fn read_all(conn: &Connection, workspace: Option<&str>) -> Result<Vec<Task>, ApiError> {
@@ -396,6 +666,28 @@ fn build_task(
         _ => Vec::new(),
     };
 
+    let tags = match merged.get("tags") {
+        Some(Value::Array(items)) => normalise_tags(items.iter().filter_map(|v| v.as_str().map(str::to_string))),
+        _ => Vec::new(),
+    };
+
+    // Task ids, without blanks, duplicates, or a link from the task to itself.
+    let task_ids = |key: &str| -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(Value::Array(items)) = merged.get(key) {
+            for raw in items.iter().filter_map(Value::as_str) {
+                let other = raw.trim().to_string();
+                if !other.is_empty() && other != id && !ids.contains(&other) {
+                    ids.push(other);
+                }
+            }
+        }
+        ids
+    };
+    let blocked_by = task_ids("blockedBy");
+    let relates_to = task_ids("relatesTo");
+    let links = normalise_links(&merged)?;
+
     Ok(Task {
         id: id.to_string(),
         title,
@@ -410,6 +702,14 @@ fn build_task(
         parent_id: text("parentId"),
         workspace: text("workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into()),
         docs,
+        tags,
+        suggested_model: text("suggestedModel").map(|m| m.trim().to_string()).unwrap_or_default(),
+        blocked_by,
+        relates_to,
+        standalone: merged.get("standalone").and_then(Value::as_bool).unwrap_or(true),
+        standalone_note: text("standaloneNote").map(|n| n.trim().to_string()).unwrap_or_default(),
+        links,
+        sprint: merged.get("sprint").and_then(Value::as_i64),
     })
 }
 
@@ -429,6 +729,14 @@ fn diff_tasks(old: &Task, new: &Task) -> Map<String, Value> {
     note("due", json!(old.due), json!(new.due));
     note("parentId", json!(old.parent_id), json!(new.parent_id));
     note("workspace", json!(old.workspace), json!(new.workspace));
+    note("tags", json!(old.tags.join(", ")), json!(new.tags.join(", ")));
+    note("suggestedModel", json!(old.suggested_model), json!(new.suggested_model));
+    note("blockedBy", json!(old.blocked_by.join(", ")), json!(new.blocked_by.join(", ")));
+    note("relatesTo", json!(old.relates_to.join(", ")), json!(new.relates_to.join(", ")));
+    note("standalone", json!(old.standalone), json!(new.standalone));
+    note("standaloneNote", json!(old.standalone_note), json!(new.standalone_note));
+    note("links", json!(old.links.join(", ")), json!(new.links.join(", ")));
+    note("sprint", json!(old.sprint), json!(new.sprint));
     if old.docs != new.docs {
         changes.insert(
             "docs".into(),
@@ -566,8 +874,25 @@ impl Store {
                 updated TEXT NOT NULL,
                 parent_id TEXT,
                 workspace_id TEXT NOT NULL DEFAULT 'default',
-                docs TEXT NOT NULL DEFAULT '[]'
+                docs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                suggested_model TEXT NOT NULL DEFAULT '',
+                blocked_by TEXT NOT NULL DEFAULT '[]',
+                relates_to TEXT NOT NULL DEFAULT '[]',
+                standalone INTEGER NOT NULL DEFAULT 1,
+                standalone_note TEXT NOT NULL DEFAULT '',
+                links TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE IF NOT EXISTS task_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                at TEXT NOT NULL,
+                actor_kind TEXT NOT NULL,
+                actor_name TEXT NOT NULL,
+                actor_model TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS task_comments_by_task ON task_comments (task_id, id);
             CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -575,6 +900,23 @@ impl Store {
                 project_root TEXT,
                 suggested_root TEXT,
                 suggested_by TEXT
+            );
+            CREATE TABLE IF NOT EXISTS views (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                layout TEXT NOT NULL,
+                filters TEXT NOT NULL DEFAULT '{}',
+                created TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sprints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'planned',
+                created TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS task_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -624,6 +966,30 @@ impl Store {
         if !columns.iter().any(|n| n == "docs") {
             conn.execute_batch("ALTER TABLE tasks ADD COLUMN docs TEXT NOT NULL DEFAULT '[]';")?;
         }
+        if !columns.iter().any(|n| n == "tags") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';")?;
+        }
+        if !columns.iter().any(|n| n == "suggested_model") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN suggested_model TEXT NOT NULL DEFAULT '';")?;
+        }
+        if !columns.iter().any(|n| n == "blocked_by") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]';")?;
+        }
+        if !columns.iter().any(|n| n == "relates_to") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN relates_to TEXT NOT NULL DEFAULT '[]';")?;
+        }
+        if !columns.iter().any(|n| n == "standalone") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN standalone INTEGER NOT NULL DEFAULT 1;")?;
+        }
+        if !columns.iter().any(|n| n == "standalone_note") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN standalone_note TEXT NOT NULL DEFAULT '';")?;
+        }
+        if !columns.iter().any(|n| n == "sprint_id") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN sprint_id INTEGER;")?;
+        }
+        if !columns.iter().any(|n| n == "links") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN links TEXT NOT NULL DEFAULT '[]';")?;
+        }
         let workspace_columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(workspaces)")?;
             let names = stmt
@@ -639,6 +1005,9 @@ impl Store {
         }
         if !workspace_columns.iter().any(|n| n == "suggested_by") {
             conn.execute_batch("ALTER TABLE workspaces ADD COLUMN suggested_by TEXT;")?;
+        }
+        if !workspace_columns.iter().any(|n| n == "sprint_days") {
+            conn.execute_batch("ALTER TABLE workspaces ADD COLUMN sprint_days INTEGER NOT NULL DEFAULT 14;")?;
         }
 
         conn.execute(
@@ -690,14 +1059,19 @@ impl Store {
         }
         let subtasks = serde_json::to_string(&task.subtasks).map_err(|e| ApiError::Internal(e.to_string()))?;
         let docs = serde_json::to_string(&task.docs).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let tags = serde_json::to_string(&task.tags).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let (blocked, related, links) = relation_columns(&task)?;
+        check_references(&conn, &task)?;
         conn.execute(
-            "INSERT INTO tasks (id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO tasks (id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs, tags, suggested_model, blocked_by, relates_to, standalone, standalone_note, links)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 task.id, task.title, task.description, task.kind, task.priority, task.status,
-                task.due, task.created, subtasks, task.updated, task.parent_id, task.workspace, docs
+                task.due, task.created, subtasks, task.updated, task.parent_id, task.workspace, docs,
+                tags, task.suggested_model, blocked, related, task.standalone as i64, task.standalone_note, links
             ],
         )?;
+        conn.execute("UPDATE tasks SET sprint_id = ?2 WHERE id = ?1", params![task.id, task.sprint])?;
         record_history(&conn, &task.id, "created", actor, &Map::new())?;
         Ok(task)
     }
@@ -711,15 +1085,22 @@ impl Store {
         }
         let subtasks = serde_json::to_string(&task.subtasks).map_err(|e| ApiError::Internal(e.to_string()))?;
         let docs = serde_json::to_string(&task.docs).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let tags = serde_json::to_string(&task.tags).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let (blocked, related, links) = relation_columns(&task)?;
+        check_references(&conn, &task)?;
         conn.execute(
             "UPDATE tasks SET title = ?2, description = ?3, type = ?4, priority = ?5, status = ?6,
-                due = ?7, subtasks = ?8, updated = ?9, parent_id = ?10, workspace_id = ?11, docs = ?12
+                due = ?7, subtasks = ?8, updated = ?9, parent_id = ?10, workspace_id = ?11, docs = ?12,
+                tags = ?13, suggested_model = ?14, blocked_by = ?15, relates_to = ?16, standalone = ?17,
+                standalone_note = ?18, links = ?19
              WHERE id = ?1",
             params![
                 id, task.title, task.description, task.kind, task.priority, task.status,
-                task.due, subtasks, task.updated, task.parent_id, task.workspace, docs
+                task.due, subtasks, task.updated, task.parent_id, task.workspace, docs,
+                tags, task.suggested_model, blocked, related, task.standalone as i64, task.standalone_note, links
             ],
         )?;
+        conn.execute("UPDATE tasks SET sprint_id = ?2 WHERE id = ?1", params![id, task.sprint])?;
         let changes = diff_tasks(&old, &task);
         if !changes.is_empty() {
             record_history(&conn, id, "updated", actor, &changes)?;
@@ -732,9 +1113,47 @@ impl Store {
         let conn = self.lock();
         if read_one(&conn, id)?.is_some() {
             conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            conn.execute("DELETE FROM task_comments WHERE task_id = ?1", [id])?;
             record_history(&conn, id, "deleted", actor, &Map::new())?;
         }
         Ok(())
+    }
+
+    /// Adds a comment. Comments are limited in length, and the task must exist.
+    pub fn add_comment(&self, task_id: &str, body: &str, actor: &Actor) -> Result<Comment, ApiError> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(ApiError::BadRequest("comment is empty".into()));
+        }
+        if body.chars().count() > 4000 {
+            return Err(ApiError::BadRequest("comments are limited to 4000 characters".into()));
+        }
+        let conn = self.lock();
+        if read_one(&conn, task_id)?.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        conn.execute(
+            "INSERT INTO task_comments (task_id, at, actor_kind, actor_name, actor_model, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_id, now_iso(), actor.kind, actor.name, actor.model, body],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.query_row(
+            &format!("SELECT {COMMENT_COLUMNS} FROM task_comments WHERE id = ?1"),
+            [id],
+            row_to_comment,
+        )
+        .optional()?
+        .ok_or(ApiError::NotFound)
+    }
+
+    /// Newest first.
+    pub fn list_comments(&self, task_id: &str) -> Result<Vec<Comment>, ApiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COMMENT_COLUMNS} FROM task_comments WHERE task_id = ?1 ORDER BY id DESC"
+        ))?;
+        let rows = stmt.query_map([task_id], row_to_comment)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Newest first.
@@ -778,12 +1197,12 @@ impl Store {
 
     /// Newest first, across the tasks in one workspace. Each entry carries its task's current title.
     /// Entries for deleted tasks are left out, because a deleted task no longer belongs to a workspace.
-    pub fn recent_history(&self, workspace: &str, limit: usize) -> Result<Vec<RecentHistoryEntry>, ApiError> {
+    pub fn recent_history(&self, workspace: Option<&str>, limit: usize) -> Result<Vec<RecentHistoryEntry>, ApiError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT h.id, h.task_id, h.at, h.action, h.actor_kind, h.actor_name, h.actor_model, h.changes, h.summary, t.title
+            "SELECT h.id, h.task_id, h.at, h.action, h.actor_kind, h.actor_name, h.actor_model, h.changes, h.summary, t.title, t.workspace_id
              FROM task_history h JOIN tasks t ON t.id = h.task_id
-             WHERE t.workspace_id = ?1
+             WHERE (?1 IS NULL OR t.workspace_id = ?1)
              ORDER BY h.id DESC LIMIT ?2",
         )?;
         let entries = stmt
@@ -791,10 +1210,264 @@ impl Store {
                 Ok(RecentHistoryEntry {
                     entry: row_to_history(row)?,
                     task_title: row.get::<_, String>(9)?,
+                    task_workspace: row.get::<_, String>(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(entries)
+    }
+
+    /// The dashboard: counts for each board, the next due tasks, and recent activity.
+    /// `workspace` limits everything to one board; `None` covers every board.
+    pub fn dashboard(&self, workspace: Option<&str>) -> Result<Value, ApiError> {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let week_out = (Utc::now() + Duration::days(7)).format("%Y-%m-%d").to_string();
+        let boards: Vec<Workspace> = self
+            .list_workspaces()?
+            .into_iter()
+            .filter(|w| workspace.map_or(true, |id| w.id == id))
+            .collect();
+
+        let mut summaries = Vec::new();
+        let mut upcoming: Vec<Value> = Vec::new();
+        let mut totals = [0u64; 5]; // active, high priority, due within 7 days, overdue, blocked
+        for board in &boards {
+            let tasks = self.list(Some(&board.id))?;
+            let statuses: std::collections::HashMap<&str, &str> =
+                tasks.iter().map(|t| (t.id.as_str(), t.status.as_str())).collect();
+            let blocked_now = |t: &Task| {
+                t.blocked_by.iter().any(|b| statuses.get(b.as_str()).map_or(true, |s| *s != "done"))
+            };
+            let active: Vec<&Task> = tasks.iter().filter(|t| t.status != "done").collect();
+            let count = |status: &str| tasks.iter().filter(|t| t.status == status).count();
+            let high = active.iter().filter(|t| t.priority == "high").count();
+            let due_soon: Vec<&&Task> = active.iter().filter(|t| !t.due.is_empty() && t.due <= week_out).collect();
+            let overdue = active.iter().filter(|t| !t.due.is_empty() && t.due < today).count();
+            let blocked = active.iter().filter(|t| blocked_now(t)).count();
+            let last_updated = tasks.iter().map(|t| t.updated.as_str()).max().unwrap_or("").to_string();
+
+            totals[0] += active.len() as u64;
+            totals[1] += high as u64;
+            totals[2] += due_soon.len() as u64;
+            totals[3] += overdue as u64;
+            totals[4] += blocked as u64;
+            for t in &due_soon {
+                upcoming.push(json!({
+                    "id": t.id, "title": t.title, "due": t.due, "status": t.status,
+                    "priority": t.priority, "workspace": board.id, "workspaceName": board.name,
+                }));
+            }
+            summaries.push(json!({
+                "id": board.id,
+                "name": board.name,
+                "projectRoot": board.project_root,
+                "active": active.len(),
+                "byStatus": {
+                    "backlog": count("backlog"),
+                    "progress": count("progress"),
+                    "review": count("review"),
+                    "done": count("done"),
+                },
+                "highPriority": high,
+                "dueSoon": due_soon.len(),
+                "overdue": overdue,
+                "blocked": blocked,
+                "lastUpdated": last_updated,
+            }));
+        }
+        upcoming.sort_by(|a, b| a["due"].as_str().cmp(&b["due"].as_str()));
+        upcoming.truncate(12);
+        let recent = self.recent_history(workspace, 25)?;
+
+        Ok(json!({
+            "scope": workspace.unwrap_or("all"),
+            "totals": {
+                "active": totals[0],
+                "highPriority": totals[1],
+                "dueSoon": totals[2],
+                "overdue": totals[3],
+                "blocked": totals[4],
+            },
+            "workspaces": summaries,
+            "upcoming": upcoming,
+            "recent": recent,
+        }))
+    }
+
+    /// The sprints of one board, newest first.
+    pub fn list_sprints(&self, workspace: &str) -> Result<Vec<Sprint>, ApiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SPRINT_COLUMNS} FROM sprints s WHERE s.workspace_id = ?1 ORDER BY s.start_date DESC, s.id DESC"
+        ))?;
+        let rows = stmt.query_map([workspace], row_to_sprint)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Creates a planned sprint. The start defaults to today. The end comes from `endDate`, from
+    /// `lengthDays`, or from the board's default length, in that order.
+    pub fn create_sprint(
+        &self,
+        workspace: &str,
+        name: &str,
+        start: Option<&str>,
+        length_days: Option<i64>,
+        end: Option<&str>,
+    ) -> Result<Sprint, ApiError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ApiError::BadRequest("name is required".into()));
+        }
+        let conn = self.lock();
+        if !workspace_exists(&conn, workspace)? {
+            return Err(ApiError::NotFound);
+        }
+        let start_day = match start.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(text) => parse_day(text)?,
+            None => Utc::now().date_naive(),
+        };
+        let end_day = resolve_sprint_end(&conn, workspace, start_day, length_days, end)?;
+        conn.execute(
+            "INSERT INTO sprints (workspace_id, name, start_date, end_date, status, created) VALUES (?1, ?2, ?3, ?4, 'planned', ?5)",
+            params![workspace, name, start_day.to_string(), end_day.to_string(), now_iso()],
+        )?;
+        let id = conn.last_insert_rowid();
+        read_sprint(&conn, id)?.ok_or(ApiError::NotFound)
+    }
+
+    /// Edits a sprint. Setting `status` to `active` starts it; only one sprint runs at a time in a board,
+    /// so close the running one first.
+    pub fn update_sprint(&self, id: i64, input: &Map<String, Value>) -> Result<Sprint, ApiError> {
+        let conn = self.lock();
+        let current = read_sprint(&conn, id)?.ok_or(ApiError::NotFound)?;
+        let name = match input.get("name").and_then(Value::as_str).map(str::trim) {
+            Some("") => return Err(ApiError::BadRequest("name is required".into())),
+            Some(name) => name.to_string(),
+            None => current.name.clone(),
+        };
+        let current_start = parse_day(&current.start_date)?;
+        let current_length = (parse_day(&current.end_date)? - current_start).num_days() + 1;
+        let start = match input.get("startDate").and_then(Value::as_str) {
+            Some(text) => parse_day(text)?,
+            None => current_start,
+        };
+        let end_text = input.get("endDate").and_then(Value::as_str);
+        // Moving the start keeps the length, unless a new length or end date is given.
+        let length = input
+            .get("lengthDays")
+            .and_then(Value::as_i64)
+            .or(if end_text.map_or(true, |t| t.trim().is_empty()) { Some(current_length) } else { None });
+        let end = resolve_sprint_end(&conn, &current.workspace, start, length, end_text)?;
+        let status = match input.get("status").and_then(Value::as_str).map(str::trim) {
+            Some(status @ ("planned" | "active" | "closed")) => status.to_string(),
+            Some(other) => return Err(ApiError::BadRequest(format!("unknown sprint status: {other}"))),
+            None => current.status.clone(),
+        };
+        if status == "active" && current.status != "active" {
+            let running: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sprints WHERE workspace_id = ?1 AND status = 'active' AND id != ?2",
+                params![current.workspace, id],
+                |row| row.get(0),
+            )?;
+            if running > 0 {
+                return Err(ApiError::Conflict("another sprint is already running in this board. Close it first.".into()));
+            }
+        }
+        conn.execute(
+            "UPDATE sprints SET name = ?2, start_date = ?3, end_date = ?4, status = ?5 WHERE id = ?1",
+            params![id, name, start.to_string(), end.to_string(), status],
+        )?;
+        read_sprint(&conn, id)?.ok_or(ApiError::NotFound)
+    }
+
+    /// Deletes a sprint. Its tasks stay on the board, just out of the sprint.
+    pub fn delete_sprint(&self, id: i64) -> Result<(), ApiError> {
+        let conn = self.lock();
+        if read_sprint(&conn, id)?.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        conn.execute("UPDATE tasks SET sprint_id = NULL WHERE sprint_id = ?1", [id])?;
+        conn.execute("DELETE FROM sprints WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Sets the default length of new sprints on a board.
+    pub fn set_sprint_days(&self, workspace: &str, days: i64) -> Result<Workspace, ApiError> {
+        if !(1..=MAX_SPRINT_DAYS).contains(&days) {
+            return Err(ApiError::BadRequest(format!("sprint length must be between 1 and {MAX_SPRINT_DAYS} days")));
+        }
+        {
+            let conn = self.lock();
+            if !workspace_exists(&conn, workspace)? {
+                return Err(ApiError::NotFound);
+            }
+            conn.execute("UPDATE workspaces SET sprint_days = ?2 WHERE id = ?1", params![workspace, days])?;
+        }
+        self.list_workspaces()?
+            .into_iter()
+            .find(|w| w.id == workspace)
+            .ok_or(ApiError::NotFound)
+    }
+
+    /// The views saved on one board, by name.
+    pub fn list_views(&self, workspace: &str) -> Result<Vec<View>, ApiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!("SELECT {VIEW_COLUMNS} FROM views WHERE workspace_id = ?1 ORDER BY name COLLATE NOCASE, id"))?;
+        let rows = stmt.query_map([workspace], row_to_view)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Saves a view: a name, a layout (board or list), and the filters to apply.
+    pub fn create_view(&self, workspace: &str, name: Option<&str>, layout: Option<&str>, filters: Option<&Value>) -> Result<View, ApiError> {
+        let name = view_name(name)?;
+        let layout = view_layout(layout)?;
+        let filters = view_filters(filters);
+        let conn = self.lock();
+        if !workspace_exists(&conn, workspace)? {
+            return Err(ApiError::NotFound);
+        }
+        let stored = serde_json::to_string(&filters).map_err(|e| ApiError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO views (workspace_id, name, layout, filters, created) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![workspace, name, layout, stored, now_iso()],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.query_row(&format!("SELECT {VIEW_COLUMNS} FROM views WHERE id = ?1"), [id], row_to_view)
+            .optional()?
+            .ok_or(ApiError::NotFound)
+    }
+
+    /// Changes a view's name, layout or filters. Fields left out keep their values.
+    pub fn update_view(&self, id: i64, input: &Map<String, Value>) -> Result<View, ApiError> {
+        let conn = self.lock();
+        let current = conn
+            .query_row(&format!("SELECT {VIEW_COLUMNS} FROM views WHERE id = ?1"), [id], row_to_view)
+            .optional()?
+            .ok_or(ApiError::NotFound)?;
+        let name = match input.get("name") {
+            Some(value) => view_name(value.as_str())?,
+            None => current.name.clone(),
+        };
+        let layout = match input.get("layout") {
+            Some(value) => view_layout(value.as_str())?,
+            None => current.layout.clone(),
+        };
+        let filters = if input.contains_key("filters") { view_filters(input.get("filters")) } else { current.filters.clone() };
+        let stored = serde_json::to_string(&filters).map_err(|e| ApiError::Internal(e.to_string()))?;
+        conn.execute("UPDATE views SET name = ?2, layout = ?3, filters = ?4 WHERE id = ?1", params![id, name, layout, stored])?;
+        conn.query_row(&format!("SELECT {VIEW_COLUMNS} FROM views WHERE id = ?1"), [id], row_to_view)
+            .optional()?
+            .ok_or(ApiError::NotFound)
+    }
+
+    /// Deletes a saved view. Its tasks and sprints are not touched.
+    pub fn delete_view(&self, id: i64) -> Result<(), ApiError> {
+        let conn = self.lock();
+        let removed = conn.execute("DELETE FROM views WHERE id = ?1", [id])?;
+        if removed == 0 {
+            return Err(ApiError::NotFound);
+        }
+        Ok(())
     }
 
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, ApiError> {
@@ -802,7 +1475,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT w.id, w.name, w.created,
                     (SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id),
-                    w.project_root, w.suggested_root, w.suggested_by
+                    w.project_root, w.suggested_root, w.suggested_by, w.sprint_days
              FROM workspaces w ORDER BY w.created ASC, w.name ASC",
         )?;
         let workspaces = stmt
@@ -815,6 +1488,7 @@ impl Store {
                     project_root: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
                     suggested_root: row.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
                     suggested_by: row.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
+                    sprint_days: row.get::<_, Option<i64>>(7)?.unwrap_or(DEFAULT_SPRINT_DAYS),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -904,6 +1578,7 @@ impl Store {
             project_root: None,
             suggested_root: None,
             suggested_by: None,
+            sprint_days: DEFAULT_SPRINT_DAYS,
         })
     }
 
@@ -1085,11 +1760,24 @@ impl Store {
             .iter()
             .filter(|t| !t.due.is_empty() && t.due <= week_out)
             .count();
+        // A blocker counts as open unless it is done. A blocker that no longer exists also counts as open.
+        let statuses: std::collections::HashMap<&str, &str> =
+            tasks.iter().map(|t| (t.id.as_str(), t.status.as_str())).collect();
+        let open_blockers = |t: &Task| -> Vec<String> {
+            t.blocked_by
+                .iter()
+                .filter(|b| statuses.get(b.as_str()).map_or(true, |s| *s != "done"))
+                .cloned()
+                .collect()
+        };
+        let blocked = active.iter().filter(|t| !open_blockers(t).is_empty()).count();
+        let sprints = self.list_sprints(workspace)?;
 
         Ok(serde_json::json!({
             "workspace": workspace,
             "schemaVersion": SCHEMA_VERSION,
-            "summary": { "active": active.len(), "blocked": 0, "dueSoon": due_soon },
+            "summary": { "active": active.len(), "blocked": blocked, "dueSoon": due_soon },
+            "sprints": sprints,
             "tasks": active.iter().map(|t| serde_json::json!({
                 "id": t.id,
                 "title": t.title,
@@ -1098,6 +1786,14 @@ impl Store {
                 "status": t.status,
                 "due": t.due,
                 "subtasks": t.subtasks,
+                "tags": t.tags,
+                "suggestedModel": t.suggested_model,
+                "parentId": t.parent_id,
+                "blockedBy": t.blocked_by,
+                "openBlockers": open_blockers(t),
+                "standalone": t.standalone,
+                "standaloneNote": t.standalone_note,
+                "sprint": t.sprint,
             })).collect::<Vec<_>>(),
         }))
     }
@@ -1297,6 +1993,240 @@ mod tests {
     }
 
     #[test]
+    fn tags_and_suggested_model_are_stored_and_recorded() {
+        let store = Store::open_in_memory().unwrap();
+        let task = store
+            .create(&obj(json!({ "title": "Tagged", "tags": [" Important ", "on hold", "important", ""] })), &who())
+            .unwrap();
+        assert_eq!(task.tags, ["important", "on hold"], "tags are trimmed, lowercased and de-duplicated");
+
+        let updated = store
+            .update(&task.id, &obj(json!({ "tags": ["on hold"], "suggestedModel": " claude-haiku-5-5 " })), &agent("model-c"))
+            .unwrap();
+        assert_eq!(updated.tags, ["on hold"]);
+        assert_eq!(updated.suggested_model, "claude-haiku-5-5");
+        let history = store.history(&task.id).unwrap();
+        assert_eq!(history[0].changes["tags"]["to"], "on hold");
+        assert_eq!(history[0].changes["suggestedModel"]["to"], "claude-haiku-5-5");
+
+        // Clearing the suggestion leaves no model behind.
+        let cleared = store.update(&task.id, &obj(json!({ "suggestedModel": "" })), &who()).unwrap();
+        assert_eq!(cleared.suggested_model, "");
+        assert_eq!(store.get(&task.id).unwrap().unwrap().suggested_model, "");
+    }
+
+    #[test]
+    fn blocked_by_and_relates_to_must_point_at_existing_tasks() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.create(&obj(json!({ "title": "First" })), &who()).unwrap();
+        let second = store
+            .create(&obj(json!({ "title": "Second", "blockedBy": [first.id.clone(), " "] })), &who())
+            .unwrap_or_else(|e| panic!("create failed: {e:?}"));
+        assert_eq!(second.blocked_by, [first.id.clone()], "blank entries are dropped");
+        assert!(matches!(
+            store.create(&obj(json!({ "title": "Bad", "blockedBy": ["AT-999"] })), &who()),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(
+            matches!(store.create(&obj(json!({ "title": "Bad link", "relatesTo": [first.id.clone(), "x"] })), &who()), Err(ApiError::BadRequest(_))),
+            "an unknown task id is refused"
+        );
+        let kept = store
+            .create(&obj(json!({ "title": "Relates", "relatesTo": [first.id.clone()] })), &who())
+            .unwrap();
+        assert_eq!(kept.relates_to, [first.id.clone()]);
+        let own = store
+            .update(&kept.id, &obj(json!({ "relatesTo": [first.id.clone(), kept.id.clone()] })), &who())
+            .unwrap();
+        assert_eq!(own.relates_to, [first.id.clone()], "a task never relates to itself");
+    }
+
+    #[test]
+    fn pick_up_note_and_links_are_stored_and_checked() {
+        let store = Store::open_in_memory().unwrap();
+        let task = store
+            .create(&obj(json!({ "title": "Subtask", "standalone": false, "standaloneNote": "Needs the parent design first" })), &who())
+            .unwrap();
+        assert!(!task.standalone);
+        assert_eq!(task.standalone_note, "Needs the parent design first");
+        let default = store.create(&obj(json!({ "title": "Normal" })), &who()).unwrap();
+        assert!(default.standalone, "tasks can be picked up alone unless said otherwise");
+
+        let linked = store
+            .update(&task.id, &obj(json!({ "links": ["https://example.com/spec", "http://example.com/a", "https://example.com/spec"] })), &who())
+            .unwrap();
+        assert_eq!(linked.links, ["https://example.com/spec", "http://example.com/a"]);
+        for bad in ["javascript:alert(1)", "file:///C:/secret.txt", "example.com", "https://a b"] {
+            assert!(
+                matches!(store.update(&task.id, &obj(json!({ "links": [bad] })), &who()), Err(ApiError::BadRequest(_))),
+                "{bad} should be refused"
+            );
+        }
+        let history = store.history(&task.id).unwrap();
+        assert_eq!(history[0].changes["links"]["to"], "https://example.com/spec, http://example.com/a");
+    }
+
+    #[test]
+    fn comments_are_stored_newest_first_with_their_author() {
+        let store = Store::open_in_memory().unwrap();
+        let task = store.create(&obj(json!({ "title": "Discuss" })), &who()).unwrap();
+        store.add_comment(&task.id, "First thought", &who()).unwrap();
+        let second = store.add_comment(&task.id, "  Second, from an agent  ", &agent("model-c")).unwrap();
+        assert_eq!(second.body, "Second, from an agent");
+        assert_eq!(second.actor_model, "model-c");
+        let listed = store.list_comments(&task.id).unwrap();
+        assert_eq!(listed[0].body, "Second, from an agent");
+        assert_eq!(listed.len(), 2);
+        assert!(matches!(store.add_comment(&task.id, "   ", &who()), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.add_comment("AT-999", "hello", &who()), Err(ApiError::NotFound)));
+        assert!(store.add_comment(&task.id, &"x".repeat(4001), &who()).is_err());
+    }
+
+    #[test]
+    fn agent_context_counts_blocked_tasks_and_flags_pick_up() {
+        let store = Store::open_in_memory().unwrap();
+        let blocker = store.create(&obj(json!({ "title": "Blocker", "status": "progress" })), &who()).unwrap();
+        let blocked = store
+            .create(&obj(json!({ "title": "Waits", "blockedBy": [blocker.id.clone()] })), &who())
+            .unwrap();
+        store.create(&obj(json!({ "title": "Solo", "standalone": false, "standaloneNote": "Needs its parent" })), &who()).unwrap();
+        let context = store.agent_context(DEFAULT_WORKSPACE).unwrap();
+        let entry = |id: &str| context["tasks"].as_array().unwrap().iter().find(|t| t["id"] == id).cloned().unwrap();
+        assert_eq!(entry(&blocked.id)["openBlockers"][0], blocker.id.as_str());
+        assert_eq!(entry(&blocker.id)["openBlockers"].as_array().unwrap().len(), 0);
+        assert_eq!(context["summary"]["blocked"].as_u64().unwrap(), 1);
+        let solo = context["tasks"].as_array().unwrap().iter().find(|t| t["title"] == "Solo").unwrap().clone();
+        assert_eq!(solo["standalone"], false);
+        assert_eq!(solo["standaloneNote"], "Needs its parent");
+
+        // Once the blocker is done, the waiting task is free.
+        store.update(&blocker.id, &obj(json!({ "status": "done" })), &who()).unwrap();
+        let after = store.agent_context(DEFAULT_WORKSPACE).unwrap();
+        assert_eq!(after["summary"]["blocked"].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn sprint_length_comes_from_the_board_or_a_typed_value() {
+        let store = Store::open_in_memory().unwrap();
+        let board = store.create_workspace("Sprint board").unwrap();
+        let default = store.create_sprint(&board.id, "Sprint 1", Some("2026-12-01"), None, None).unwrap();
+        assert_eq!(default.status, "planned");
+        assert_eq!(default.start_date, "2026-12-01");
+        assert_eq!(default.end_date, "2026-12-14", "the default length is 14 days, both ends counted");
+
+        let changed = store.set_sprint_days(&board.id, 10).unwrap();
+        assert_eq!(changed.sprint_days, 10);
+        let shorter = store.create_sprint(&board.id, "Sprint 2", Some("2026-12-15"), None, None).unwrap();
+        assert_eq!(shorter.end_date, "2026-12-24");
+
+        let typed_length = store.create_sprint(&board.id, "Sprint 3", Some("2026-12-25"), Some(3), None).unwrap();
+        assert_eq!(typed_length.end_date, "2026-12-27");
+        let typed_end = store.create_sprint(&board.id, "Sprint 4", Some("2026-12-28"), Some(3), Some("2027-01-02")).unwrap();
+        assert_eq!(typed_end.end_date, "2027-01-02", "a typed end date wins over a length");
+
+        assert!(matches!(store.create_sprint(&board.id, "Backwards", Some("2026-12-10"), None, Some("2026-12-01")), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_sprint(&board.id, "Too long", Some("2026-12-01"), Some(91), None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_sprint(&board.id, "Bad date", Some("1st December"), None, None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_sprint(&board.id, "  ", None, None, None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.set_sprint_days(&board.id, 0), Err(ApiError::BadRequest(_))));
+        assert_eq!(store.list_sprints(&board.id).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn only_one_sprint_runs_at_a_time_in_a_board() {
+        let store = Store::open_in_memory().unwrap();
+        let board = store.create_workspace("Running board").unwrap();
+        let first = store.create_sprint(&board.id, "First", Some("2026-12-01"), None, None).unwrap();
+        let second = store.create_sprint(&board.id, "Second", Some("2026-12-15"), None, None).unwrap();
+        let mut start = Map::new();
+        start.insert("status".into(), json!("active"));
+        store.update_sprint(first.id, &start).unwrap();
+        assert!(matches!(store.update_sprint(second.id, &start), Err(ApiError::Conflict(_))));
+        let mut close = Map::new();
+        close.insert("status".into(), json!("closed"));
+        store.update_sprint(first.id, &close).unwrap();
+        assert_eq!(store.update_sprint(second.id, &start).unwrap().status, "active");
+
+        // Moving the start keeps the 14-day length, so the end moves with it.
+        let mut move_start = Map::new();
+        move_start.insert("startDate".into(), json!("2026-12-20"));
+        let moved = store.update_sprint(second.id, &move_start).unwrap();
+        assert_eq!(moved.start_date, "2026-12-20");
+        assert_eq!(moved.end_date, "2027-01-02");
+    }
+
+    #[test]
+    fn tasks_join_a_sprint_and_leave_it_when_the_sprint_is_deleted() {
+        let store = Store::open_in_memory().unwrap();
+        let board = store.create_workspace("Joining board").unwrap();
+        let other = store.create_workspace("Other board").unwrap();
+        let sprint = store.create_sprint(&board.id, "Sprint", Some("2026-12-01"), None, None).unwrap();
+        let elsewhere = store.create_sprint(&other.id, "Elsewhere", Some("2026-12-01"), None, None).unwrap();
+
+        let task = store
+            .create(&obj(json!({ "title": "In sprint", "workspace": board.id.clone(), "sprint": sprint.id })), &who())
+            .unwrap();
+        assert_eq!(task.sprint, Some(sprint.id));
+        assert_eq!(store.list_sprints(&board.id).unwrap()[0].tasks, 1);
+        assert!(matches!(
+            store.create(&obj(json!({ "title": "Wrong board", "workspace": board.id.clone(), "sprint": elsewhere.id })), &who()),
+            Err(ApiError::BadRequest(_))
+        ));
+
+        let moved = store.update(&task.id, &obj(json!({ "sprint": null })), &who()).unwrap();
+        assert_eq!(moved.sprint, None);
+        assert_eq!(store.history(&task.id).unwrap()[0].changes["sprint"]["to"], Value::Null);
+        store.update(&task.id, &obj(json!({ "sprint": sprint.id })), &who()).unwrap();
+        store.delete_sprint(sprint.id).unwrap();
+        assert_eq!(store.get(&task.id).unwrap().unwrap().sprint, None, "deleting a sprint keeps its tasks");
+        assert!(matches!(store.delete_sprint(sprint.id), Err(ApiError::NotFound)));
+    }
+
+    #[test]
+    fn agent_context_lists_the_board_sprints_and_each_tasks_sprint() {
+        let store = Store::open_in_memory().unwrap();
+        let board = store.create_workspace("Context board").unwrap();
+        let sprint = store.create_sprint(&board.id, "Running", Some("2026-12-01"), None, None).unwrap();
+        store.create(&obj(json!({ "title": "Sprinted", "workspace": board.id.clone(), "sprint": sprint.id })), &who()).unwrap();
+        let context = store.agent_context(&board.id).unwrap();
+        assert_eq!(context["sprints"][0]["name"], "Running");
+        let task = context["tasks"].as_array().unwrap().iter().find(|t| t["title"] == "Sprinted").unwrap().clone();
+        assert_eq!(task["sprint"], sprint.id);
+    }
+
+    #[test]
+    fn views_save_a_layout_and_filters_per_board() {
+        let store = Store::open_in_memory().unwrap();
+        let board = store.create_workspace("View board").unwrap();
+        let other = store.create_workspace("Other views").unwrap();
+        let saved = store
+            .create_view(&board.id, Some("  Sprint 4 list "), Some("list"), Some(&json!({ "sprint": "3", "priority": "high", "colour": "pink", "tag": "" })))
+            .unwrap();
+        assert_eq!(saved.name, "Sprint 4 list");
+        assert_eq!(saved.layout, "list");
+        assert_eq!(saved.filters.get("sprint").map(String::as_str), Some("3"));
+        assert!(!saved.filters.contains_key("colour"), "unknown filters are dropped");
+        assert!(!saved.filters.contains_key("tag"), "empty filters are not saved");
+        assert_eq!(store.list_views(&board.id).unwrap().len(), 1);
+        assert!(store.list_views(&other.id).unwrap().is_empty(), "views belong to one board");
+
+        let mut change = Map::new();
+        change.insert("layout".into(), json!("board"));
+        let updated = store.update_view(saved.id, &change).unwrap();
+        assert_eq!(updated.layout, "board");
+        assert_eq!(updated.filters.get("priority").map(String::as_str), Some("high"), "filters are kept when not sent");
+        let mut replace = Map::new();
+        replace.insert("filters".into(), json!({}));
+        assert!(store.update_view(saved.id, &replace).unwrap().filters.is_empty());
+
+        assert!(matches!(store.create_view(&board.id, Some("Bad"), Some("calendar"), None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_view(&board.id, Some("   "), Some("board"), None), Err(ApiError::BadRequest(_))));
+        assert!(matches!(store.create_view("nope", Some("x"), Some("board"), None), Err(ApiError::NotFound)));
+        store.delete_view(saved.id).unwrap();
+        assert!(matches!(store.delete_view(saved.id), Err(ApiError::NotFound)));
+    }
+
+    #[test]
     fn agent_board_requests_wait_for_approval() {
         let store = Store::open_in_memory().unwrap();
         let dir = std::env::temp_dir().join(format!("clankban-request-{}", std::process::id()));
@@ -1379,6 +2309,31 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_counts_each_board_and_covers_all_of_them() {
+        let store = Store::open_in_memory().unwrap();
+        let garden = store.create_workspace("Garden").unwrap();
+        store.create(&obj(json!({ "title": "High", "priority": "high", "workspace": garden.id })), &who()).unwrap();
+        store.create(&obj(json!({ "title": "Late", "due": "2000-01-01", "workspace": garden.id })), &who()).unwrap();
+        let blocker = store.create(&obj(json!({ "title": "Blocker" })), &who()).unwrap();
+        store.create(&obj(json!({ "title": "Waits", "blockedBy": [blocker.id.clone()] })), &who()).unwrap();
+
+        let all = store.dashboard(None).unwrap();
+        assert_eq!(all["scope"], "all");
+        assert!(all["totals"]["overdue"].as_u64().unwrap() >= 1);
+        assert_eq!(all["workspaces"].as_array().unwrap().len(), store.list_workspaces().unwrap().len());
+        let garden_card = all["workspaces"].as_array().unwrap().iter().find(|w| w["id"] == garden.id.as_str()).unwrap().clone();
+        assert_eq!(garden_card["highPriority"], 1);
+        assert_eq!(garden_card["overdue"], 1);
+        assert_eq!(garden_card["byStatus"]["backlog"], 2);
+
+        let one = store.dashboard(Some(&garden.id)).unwrap();
+        assert_eq!(one["workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(one["totals"]["active"], 2);
+        assert!(one["upcoming"].as_array().unwrap().iter().all(|u| u["workspace"] == garden.id.as_str()));
+        assert!(one["recent"].as_array().unwrap().iter().all(|e| e["taskWorkspace"] == garden.id.as_str()));
+    }
+
+    #[test]
     fn recent_history_is_newest_first_and_stays_in_its_workspace() {
         let store = Store::open_in_memory().unwrap();
         let garden = store.create_workspace("Garden").unwrap();
@@ -1386,14 +2341,14 @@ mod tests {
         store.create(&obj(json!({ "title": "Elsewhere" })), &who()).unwrap();
         store.update(&mow.id, &obj(json!({ "status": "progress" })), &agent("model-c")).unwrap();
 
-        let recent = store.recent_history(&garden.id, 10).unwrap();
+        let recent = store.recent_history(Some(&garden.id), 10).unwrap();
         assert!(recent.iter().all(|e| e.entry.task_id == mow.id));
         assert_eq!(recent[0].entry.action, "updated");
         assert_eq!(recent[0].entry.actor_model, "model-c");
         assert_eq!(recent[0].task_title, "Mow");
         assert_eq!(recent.last().unwrap().entry.action, "created");
-        assert_eq!(store.recent_history(&garden.id, 1).unwrap().len(), 1);
-        assert!(store.recent_history(DEFAULT_WORKSPACE, 50).unwrap().iter().all(|e| e.entry.task_id != mow.id));
+        assert_eq!(store.recent_history(Some(&garden.id), 1).unwrap().len(), 1);
+        assert!(store.recent_history(Some(DEFAULT_WORKSPACE), 50).unwrap().iter().all(|e| e.entry.task_id != mow.id));
     }
 
     #[test]

@@ -37,12 +37,21 @@
         <div class="workspace-actions"><button class="ws-rename" id="editWorkspace" title="Rename this workspace">Rename</button></div>
       </div>
       <nav class="primary-nav" aria-label="Views">
-        <button class="nav-item active" data-view="board"><span>▦</span> Board <span class="nav-count" id="navBoardCount">0</span></button>
+        <button class="nav-item active" data-view="dashboard"><span>⌂</span> Dashboard</button>
+        <button class="nav-item" data-view="board"><span>▦</span> Board <span class="nav-count" id="navBoardCount">0</span></button>
         <button class="nav-item" data-view="list"><span>☰</span> List</button>
         <button class="nav-item" data-view="recent"><span>◷</span> Recent changes <span class="nav-count coral" id="navRecentCount">0</span></button>
         <button class="nav-item" data-view="agent"><span>✦</span> Agent runs <span class="nav-count" id="navAgentCount">0</span></button>
         <button class="nav-item" data-view="docs"><span>❡</span> Project docs</button>
       </nav>
+      <div class="sidebar-label">Saved views</div>
+      <div class="view-picker">
+        <select id="viewPicker" aria-label="Saved views"></select>
+        <div class="view-picker-actions">
+          <button class="button quiet" id="saveView" type="button">Save view…</button>
+          <button class="button quiet danger" id="deleteView" type="button" hidden>Delete view</button>
+        </div>
+      </div>
       <div class="sidebar-spacer"></div>
       <div class="agent-status"><span class="status-dot" id="syncDot"></span><div><strong id="syncStatus">Connecting…</strong><small id="syncDetail"></small></div></div>
       <button class="button quiet theme-toggle" id="themeToggle">Dark mode</button>
@@ -53,7 +62,7 @@
     </aside>
 
     <main class="main-content" id="board">
-      <header class="topbar"><div class="breadcrumbs"><span id="workspaceCrumb">Default</span><b>/</b><strong id="viewTitle">Product board</strong></div><div class="top-actions"><button class="icon-button" id="refreshBoard" title="Refresh board (F5)">↻</button><button class="icon-button" id="focusSearch" title="Search (/)">⌕</button><button class="icon-button" id="openPalette" title="Command menu (Ctrl+K)">⌘K</button><button class="help-button" id="openHelp" title="Keyboard shortcuts (?)">?</button></div></header>
+      <header class="topbar"><div class="breadcrumbs"><button type="button" class="crumb-link" id="workspaceCrumb" title="Open this workspace's dashboard">Default</button><b>/</b><strong id="viewTitle">Product board</strong></div><div class="top-actions"><button class="icon-button" id="refreshBoard" title="Refresh board (F5)">↻</button><button class="icon-button" id="focusSearch" title="Search (/)">⌕</button><button class="icon-button" id="openPalette" title="Command menu (Ctrl+K)">⌘K</button><button class="help-button" id="openHelp" title="Keyboard shortcuts (?)">?</button></div></header>
       <div id="boardRequests" class="board-requests"></div>
       <section class="page-heading"><div><div class="eyebrow"><span class="live-dot"></span> LOCAL PROJECT</div><h1>Product board</h1><p>One visual source of truth for your work and your agents.</p></div><div class="heading-actions"><button class="button quiet" id="copyJson">↗ Copy agent JSON</button><button class="button primary" id="newTask">＋ New task</button></div></section>
 
@@ -69,7 +78,7 @@
       <section class="filter-panel" id="filterPanel" hidden aria-label="Filters">
         <label>Priority<select id="filterPriority"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
         <label>Type<select id="filterType"><option value="">Any</option><option value="epic">Epic</option><option value="task">Task</option><option value="subtask">Subtask</option><option value="bug">Bug fix</option></select></label>
-        <label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
+        <label>Tag<select id="filterTag"><option value="">Any</option><option value="important">Important</option><option value="on hold">On hold</option></select></label><label>Sprint<select id="filterSprint"><option value="">Any</option><option value="none">No sprint</option></select></label><button class="button quiet" id="openSprints" type="button">Sprints…</button><label>Status<select id="filterStatus"><option value="">Any</option><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label>
         <button class="button quiet" id="clearFilters" type="button">Clear</button>
       </section>
 
@@ -77,6 +86,7 @@
       <section class="list-view" id="listView" hidden></section>
       <section class="recent-view" id="recentView" hidden></section>
       <section class="agent-view" id="agentView" hidden></section>
+      <section class="dashboard-view" id="dashboardView" hidden></section>
       <section class="docs-view" id="docsView" hidden><div id="docsSuggestion"></div><div id="docsBody"></div></section>
 
       <footer class="board-footer"><span><span class="kbd">Ctrl</span> + <span class="kbd">K</span> command menu · <span class="kbd">?</span> shortcuts</span><span id="footerStatus">Data stored locally <span class="local-pill">●</span></span></footer>
@@ -86,11 +96,11 @@
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
   <aside class="task-drawer" id="taskDrawer" aria-label="Task details">
     <div class="drawer-header"><span id="drawerType" class="type-badge task">TASK</span><button class="close-button" id="closeDrawer">×</button></div>
-    <div class="drawer-content"><div class="task-id" id="drawerId">AT-104</div><h2 id="drawerTitle">Task title</h2><p id="drawerDescription">Description</p><div class="drawer-meta" id="drawerMeta"></div><div class="drawer-section"><div class="section-heading"><span>Subtasks</span><span id="subtaskCount">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div></div><div class="drawer-section"><div class="section-heading">Docs</div><div id="drawerDocs" class="doc-chips"></div></div><div class="drawer-section"><div class="section-heading">History</div><p class="history-last">Last change: <span id="drawerUpdated">—</span></p><div id="drawerHistory" class="history-list"></div></div></div>
+    <div class="drawer-content"><div class="task-id" id="drawerId">AT-104</div><h2 id="drawerTitle">Task title</h2><div id="drawerDescription" class="task-description">Description</div><div class="drawer-meta" id="drawerMeta"></div><div class="drawer-tags" id="drawerTags"></div><div class="drawer-section"><div class="section-heading"><span>Subtasks</span><span id="subtaskCount">0 / 0</span></div><div id="subtaskList" class="subtask-list"></div></div><div class="drawer-section"><div class="section-heading">Docs</div><div id="drawerDocs" class="doc-chips"></div></div><div id="drawerRelations"></div><div class="drawer-section"><div class="section-heading"><span>Comments</span><span id="commentCount"></span></div><div id="commentList" class="comment-list"></div><form id="commentForm" class="comment-form" autocomplete="off"><textarea name="body" rows="2" placeholder="Write a comment for people or agents…" required></textarea><div class="modal-actions"><button class="button primary" type="submit">Post comment</button></div></form></div><div class="drawer-section"><div class="section-heading">History</div><p class="history-last">Last change: <span id="drawerUpdated">—</span></p><div id="drawerHistory" class="history-list"></div></div></div>
     <div class="drawer-footer"><button class="button danger quiet" id="deleteTask">Delete</button><button class="button quiet" id="editTask">Edit task</button></div>
   </aside>
 
-  <div class="modal-backdrop" id="modalBackdrop"><form class="task-modal" id="taskForm"><div class="modal-header"><div><span class="eyebrow">WORK ITEM</span><h2 id="modalTitle">Create a task</h2></div><button type="button" class="close-button" id="closeModal">×</button></div><label>Title<input name="title" required placeholder="What needs to happen?" /></label><div class="form-grid"><label>Type<select name="type"><option value="task">Task</option><option value="epic">Epic</option><option value="bug">Bug fix</option><option value="subtask">Subtask</option></select></label><label>Priority<select name="priority"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label></div><div class="form-grid"><label>Status<select name="status"><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label><label>Due date<input type="date" name="due" /></label></div><label>Linked docs<input name="docs" placeholder="docs/TASKS.md, README.md" /></label><label>Description<textarea name="description" rows="3" placeholder="Add context for teammates and agents..."></textarea></label><div class="modal-actions"><button type="button" class="button quiet" id="cancelModal">Cancel</button><button class="button primary" type="submit">Save work item</button></div></form></div>
+  <div class="modal-backdrop" id="modalBackdrop"><form class="task-modal" id="taskForm"><div class="modal-header"><div><span class="eyebrow">WORK ITEM</span><h2 id="modalTitle">Create a task</h2></div><button type="button" class="close-button" id="closeModal">×</button></div><label>Title<input name="title" required placeholder="What needs to happen?" /></label><div class="form-grid"><label>Type<select name="type"><option value="task">Task</option><option value="epic">Epic</option><option value="bug">Bug fix</option><option value="subtask">Subtask</option></select></label><label>Priority<select name="priority"><option value="high">High</option><option value="medium" selected>Medium</option><option value="low">Low</option></select></label></div><div class="form-grid"><label>Status<select name="status"><option value="backlog">Backlog</option><option value="progress">In progress</option><option value="review">In review</option><option value="done">Done</option></select></label><label>Due date<input type="date" name="due" /></label></div><label>Linked docs<input name="docs" placeholder="docs/TASKS.md, README.md" /></label><label>Tags<input name="tags" placeholder="important, on hold" /></label><label>Suggested model<input name="suggestedModel" placeholder="e.g. claude-haiku-5-5 (a suggestion only)" /></label><label>Sprint<select name="sprint" id="taskSprint"><option value="">No sprint</option></select></label><label>Blocked by<input name="blockedBy" placeholder="AT-12, AT-14" /></label><label>Relates to<input name="relatesTo" placeholder="AT-20" /></label><label class="check-row"><input type="checkbox" name="standalone" checked /> Can be picked up on its own</label><label>If it cannot, why<input name="standaloneNote" placeholder="Needs the parent's design first" /></label><label>Links<input name="links" placeholder="https://example.com/spec, https://example.com/pr" /></label><label>Description<textarea name="description" rows="3" placeholder="Add context for teammates and agents..."></textarea></label><div class="modal-actions"><button type="button" class="button quiet" id="cancelModal">Cancel</button><button class="button primary" type="submit">Save work item</button></div></form></div>
 
   <div class="json-modal-backdrop" id="jsonModalBackdrop"><div class="json-modal"><div class="modal-header"><div><span class="eyebrow">AGENT INTERFACE</span><h2>Board state as JSON</h2></div><button class="close-button" id="closeJson">×</button></div><p class="modal-note">This is the canonical local representation an agent can read, index, or update through the MCP bridge.</p><pre id="jsonOutput"></pre><div class="modal-actions"><button class="button primary" id="copyJsonModal">Copy JSON</button></div></div></div>
 
@@ -105,6 +115,32 @@
         <button class="button quiet" id="laterChangelog" type="button">Close</button>
         <button class="button primary" id="changelogInstall" type="button" hidden>Install and restart</button>
       </div>
+    </div>
+  </div>
+
+  <div class="json-modal-backdrop" id="sprintBackdrop">
+    <div class="json-modal sprint-modal" role="dialog" aria-labelledby="sprintTitle">
+      <div class="modal-header">
+        <div><div class="eyebrow">Board</div><h2 id="sprintTitle">Sprints</h2></div>
+        <button class="close-button" id="closeSprints" aria-label="Close">×</button>
+      </div>
+      <div id="sprintList" class="sprint-list"></div>
+      <form id="sprintForm" class="sprint-form" autocomplete="off">
+        <h3>New sprint</h3>
+        <div class="form-grid">
+          <label>Name<input name="name" required placeholder="Sprint 4" /></label>
+          <label>Start<input type="date" name="startDate" /></label>
+        </div>
+        <div class="form-grid">
+          <label>Length in days<input type="number" name="lengthDays" min="1" max="90" placeholder="board default" /></label>
+          <label>Or an end date<input type="date" name="endDate" /></label>
+        </div>
+        <div class="modal-actions"><button class="button primary" type="submit">Create sprint</button></div>
+      </form>
+      <form id="sprintDaysForm" class="sprint-form" autocomplete="off">
+        <label>Default length for this board, in days<input type="number" name="days" min="1" max="90" required /></label>
+        <div class="modal-actions"><button class="button quiet" type="submit">Save default</button></div>
+      </form>
     </div>
   </div>
 

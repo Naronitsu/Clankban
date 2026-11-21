@@ -1,5 +1,7 @@
 // Release builds run as a GUI app; debug builds keep a console for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The MCP tool list is one large json! literal; it needs more room than the default limit.
+#![recursion_limit = "256"]
 
 mod api;
 mod docs;
@@ -54,7 +56,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![check_for_update, install_update, pick_project_folder, get_changelog])
+        .invoke_handler(tauri::generate_handler![check_for_update, install_update, pick_project_folder, get_changelog, open_external])
         .setup(|app| {
             let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
 
@@ -177,6 +179,57 @@ async fn find_update(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
         version: u.version,
         notes: u.body.unwrap_or_default(),
     }))
+}
+
+/// Opens a link in the person's default browser. Only plain http and https addresses are opened.
+/// The address goes to the system opener as one argument, never through a shell.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let link = web_link(&url)?;
+    open_in_browser(&link)
+}
+
+/// A plain http or https address, trimmed. Anything else is refused.
+fn web_link(url: &str) -> Result<String, String> {
+    let link = url.trim();
+    let lower = link.to_ascii_lowercase();
+    let web = lower.starts_with("http://") || lower.starts_with("https://");
+    if !web || link.len() > 2000 || link.contains(char::is_whitespace) {
+        return Err("only http and https links can be opened".into());
+    }
+    Ok(link.to_string())
+}
+
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("open").arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open").arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod link_tests {
+    #[test]
+    fn only_web_links_are_opened() {
+        assert!(super::web_link("https://example.com/a?b=c").is_ok());
+        assert!(super::web_link("  http://example.com ").is_ok());
+        assert!(super::web_link("file:///C:/Windows/system.ini").is_err());
+        assert!(super::web_link("javascript:alert(1)").is_err());
+        assert!(super::web_link("https://a b.example").is_err(), "whitespace is refused");
+        assert!(super::web_link("C:\\\\tools\\\\run.exe").is_err());
+    }
 }
 
 #[tauri::command]
