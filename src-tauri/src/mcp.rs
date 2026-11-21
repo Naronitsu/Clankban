@@ -307,6 +307,15 @@ fn tool_definitions() -> Value {
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
                     "workspace": { "type": "string", "description": "Move the task to this workspace" },
+                    "subtasks": {
+                        "type": "array",
+                        "description": "Replaces the whole checklist; send every item, with its done flag",
+                        "items": {
+                            "type": "object",
+                            "properties": { "title": { "type": "string" }, "done": { "type": "boolean" } },
+                            "required": ["title"]
+                        }
+                    },
                     "model": { "type": "string" }
                 },
                 "required": ["id"]
