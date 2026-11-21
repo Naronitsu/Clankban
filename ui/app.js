@@ -38,6 +38,10 @@ let skills = [];
 let runRequests = [];
 let agentFormsBuilt = false;
 let workspaces = [];
+let projectDocs = null;
+let selectedDoc = null;
+let docBody = '';
+let docsSearch = '';
 let workspace = (() => {
   try { return localStorage.getItem('clankban-workspace') || 'default'; } catch { return 'default'; }
 })();
@@ -86,6 +90,9 @@ async function loadWorkspaces() {
 
 function setWorkspace(id, reload = true) {
   workspace = id;
+  projectDocs = null;
+  selectedDoc = null;
+  docBody = '';
   try { localStorage.setItem('clankban-workspace', id); } catch { /* the choice is a convenience only */ }
   if (reload) loadRemoteTasks();
 }
@@ -352,11 +359,13 @@ function render() {
   $('#listView').hidden = view !== 'list';
   $('#recentView').hidden = view !== 'recent';
   $('#agentView').hidden = view !== 'agent';
-  $('#viewTitle').textContent = { board: 'Product board', list: 'List', recent: 'Recent changes', agent: 'Agent runs' }[view];
+  $('#docsView').hidden = view !== 'docs';
+  $('#viewTitle').textContent = { board: 'Product board', list: 'List', recent: 'Recent changes', agent: 'Agent runs', docs: 'Project docs' }[view];
   if (view === 'board') renderBoard(list);
   if (view === 'list') renderList(list);
   if (view === 'recent') renderRecent(list);
   if (view === 'agent') renderAgent();
+  if (view === 'docs') renderDocs();
 
   const count = activeFilterCount();
   $('#filterBadge').hidden = count === 0;
@@ -389,6 +398,7 @@ function openDrawer(id) {
   $('#drawerDescription').textContent = t.description || 'No description yet.';
   $('#drawerMeta').innerHTML = `<span class="meta-pill">${t.priority} priority</span><span class="meta-pill">${statusLabel[t.status] || t.status}</span><span class="meta-pill">Due ${formatDate(t.due)}</span>`;
   $('#drawerUpdated').textContent = formatDateTime(t.updated);
+  renderDrawerDocs(t);
   loadHistory(id);
   const done = all.filter(s => s.done).length;
   $('#subtaskCount').textContent = `${done} / ${all.length}`;
@@ -448,6 +458,7 @@ function openModal(id = null, status = 'backlog') {
   $('#modalTitle').textContent = t ? 'Edit work item' : 'Create a task';
   const form = $('#taskForm');
   form.reset();
+  form.elements.docs.value = t ? (t.docs || []).join(', ') : '';
   if (t) {
     for (const key of ['title', 'type', 'priority', 'status', 'due', 'description']) form.elements[key].value = t[key] || '';
   } else {
@@ -464,6 +475,7 @@ function closeModal() {
 async function saveTask(event) {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(event.target));
+  data.docs = parseDocList(data.docs);
   try {
     if (editingId) {
       const t = tasks.find(x => x.id === editingId);
@@ -758,6 +770,209 @@ function toggleTheme() {
   updateThemeButton();
 }
 
+// ---- project docs (read-only) ----------------------------------------------
+// The workspace's project folder, shown read-only. A person picks the folder. The board
+// never writes to it.
+
+function errorText(error) {
+  try { return JSON.parse(error.message).error || error.message; } catch { return error.message; }
+}
+
+function currentWorkspace() { return workspaces.find(w => w.id === workspace); }
+
+function parseDocList(text = '') {
+  return String(text).split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function loadProjectDocs() {
+  const current = currentWorkspace();
+  if (!remoteMode || !current?.projectRoot) {
+    projectDocs = null;
+    return;
+  }
+  try {
+    projectDocs = await apiRequest(`/api/workspaces/${enc(workspace)}/docs`);
+  } catch (error) {
+    projectDocs = { error: errorText(error) };
+  }
+}
+
+function docGroups(docs, query) {
+  const q = query.trim().toLowerCase();
+  const groups = new Map();
+  for (const doc of docs.filter(d => !q || `${d.path} ${d.title}`.toLowerCase().includes(q))) {
+    const slash = doc.path.lastIndexOf('/');
+    const folder = slash < 0 ? '(top level)' : doc.path.slice(0, slash);
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(doc);
+  }
+  return groups;
+}
+
+function inlineMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+}
+
+// A small Markdown renderer: headings, lists, fenced code, paragraphs, and inline code and emphasis.
+function renderMarkdown(md) {
+  const out = [];
+  let list = null;
+  let code = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of md.split('\n')) {
+    if (raw.startsWith('```')) {
+      if (code === null) { closeList(); code = []; }
+      else { out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`); code = null; }
+      continue;
+    }
+    if (code !== null) { code.push(raw); continue; }
+    const line = raw.trimEnd();
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+    } else if (bullet || numbered) {
+      const tag = numbered ? 'ol' : 'ul';
+      if (list !== tag) { closeList(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inlineMarkdown((bullet || numbered)[1])}</li>`);
+    } else if (line === '') {
+      closeList();
+    } else {
+      closeList();
+      out.push(`<p>${inlineMarkdown(line)}</p>`);
+    }
+  }
+  if (code !== null) out.push(`<pre><code>${escapeHtml(code.join('\n'))}</code></pre>`);
+  closeList();
+  return out.join('\n');
+}
+
+async function openDoc(path) {
+  selectedDoc = path;
+  docBody = 'Loading…';
+  renderDocs(true);
+  try {
+    const result = await apiRequest(`/api/workspaces/${enc(workspace)}/docs/read?path=${enc(path)}`);
+    if (selectedDoc !== path) return;
+    docBody = result.content;
+  } catch (error) {
+    if (selectedDoc !== path) return;
+    docBody = `Could not open ${path}: ${errorText(error)}`;
+  }
+  renderDocs(true);
+}
+
+function renderDocs(force = false) {
+  const box = $('#docsView');
+  if (!box) return;
+  // Keep typing in the filter undisturbed by the five-second refresh.
+  if (!force && document.activeElement?.id === 'docsSearch') return;
+  if (!remoteMode) {
+    box.innerHTML = '<div class="empty-note">Project docs need the desktop app. Open the installed Clankban to read a project folder.</div>';
+    return;
+  }
+  const current = currentWorkspace();
+  if (!current?.projectRoot) {
+    box.innerHTML = `<div class="docs-empty">
+        <h2>Connect a project folder</h2>
+        <p>Pick the folder of the project this workspace is for. Clankban reads its Markdown files and never writes to them.</p>
+        <button class="button primary" data-doc-folder>Choose folder…</button>
+      </div>`;
+    return;
+  }
+  if (!projectDocs) {
+    box.innerHTML = '<div class="empty-note">Reading the project folder…</div>';
+    loadProjectDocs().then(() => renderDocs(true));
+    return;
+  }
+  if (projectDocs.error) {
+    box.innerHTML = `<div class="docs-empty">
+        <h2>Folder unavailable</h2>
+        <p>${escapeHtml(projectDocs.error)}</p>
+        <button class="button quiet" data-doc-folder>Choose another folder…</button>
+      </div>`;
+    return;
+  }
+  const groups = [...docGroups(projectDocs.docs, docsSearch)];
+  const list = groups.map(([folder, items]) => `
+      <div class="doc-group">
+        <div class="doc-folder">${escapeHtml(folder)}</div>
+        ${items.map(d => `<button class="doc-item ${d.path === selectedDoc ? 'active' : ''}" data-doc="${escapeHtml(d.path)}">
+            <span class="doc-title">${escapeHtml(d.title)}</span>
+            <span class="doc-path">${escapeHtml(d.path.split('/').pop())}</span>
+          </button>`).join('')}
+      </div>`).join('') || '<div class="empty-note">No Markdown files match.</div>';
+  box.innerHTML = `
+    <div class="docs-header">
+      <div class="docs-root"><span class="docs-label">Project folder</span><code>${escapeHtml(projectDocs.root)}</code></div>
+      <div class="docs-actions">
+        <button class="button quiet" data-doc-folder>Change…</button>
+        <button class="button quiet" data-doc-clear>Disconnect</button>
+      </div>
+    </div>
+    <div class="docs-layout">
+      <aside class="docs-list">
+        <input id="docsSearch" class="docs-search" placeholder="Filter ${projectDocs.docs.length} documents" value="${escapeHtml(docsSearch)}" />
+        ${list}
+      </aside>
+      <article class="docs-reader">
+        ${selectedDoc
+          ? `<div class="docs-reader-path">${escapeHtml(selectedDoc)}</div>${renderMarkdown(docBody)}`
+          : '<div class="empty-note">Pick a document to read it.</div>'}
+      </article>
+    </div>`;
+}
+
+function renderDrawerDocs(task) {
+  const box = $('#drawerDocs');
+  if (!box) return;
+  const docs = task.docs || [];
+  box.innerHTML = docs.length
+    ? docs.map(p => `<button class="doc-chip" data-open-doc="${escapeHtml(p)}">${escapeHtml(p)}</button>`).join('')
+    : '<span class="history-empty">No linked documents. Add some in the edit form.</span>';
+}
+
+async function openLinkedDoc(path) {
+  closeDrawer();
+  selectedDoc = null;
+  setView('docs');
+  await openDoc(path);
+}
+
+async function setProjectFolder(root) {
+  try {
+    const result = await apiRequest(`/api/workspaces/${enc(workspace)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify({ root }),
+    });
+    workspaces = result.workspaces;
+    projectDocs = null;
+    selectedDoc = null;
+    docBody = '';
+    render();
+  } catch (error) {
+    alert(`Could not set the project folder: ${errorText(error)}`);
+  }
+}
+
+async function chooseProjectFolder() {
+  if (!tauriCore) return;
+  let path = null;
+  try {
+    path = await tauriCore.invoke('pick_project_folder');
+  } catch (error) {
+    alert(`Could not open the folder picker: ${errorText(error)}`);
+    return;
+  }
+  if (path) await setProjectFolder(path);
+}
+
 // ---- wiring ----------------------------------------------------------------
 
 function isOpen(selector) { return document.querySelector(selector).classList.contains('open'); }
@@ -821,6 +1036,22 @@ $('#closeHelp').onclick = closeHelp;
 $('#helpBackdrop').onclick = e => { if (e.target.id === 'helpBackdrop') closeHelp(); };
 
 $('#refreshBoard').onclick = refreshNow;
+document.addEventListener('click', e => {
+  const doc = e.target.closest('[data-doc]');
+  if (doc) return openDoc(doc.dataset.doc);
+  const chip = e.target.closest('[data-open-doc]');
+  if (chip) return openLinkedDoc(chip.dataset.openDoc);
+  if (e.target.closest('[data-doc-folder]')) return chooseProjectFolder();
+  if (e.target.closest('[data-doc-clear]') && confirm('Disconnect the project folder? Its files stay where they are.')) {
+    return setProjectFolder(null);
+  }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'docsSearch') {
+    docsSearch = e.target.value;
+    renderDocs(true);
+  }
+});
 $('#workspaceButton').onclick = () => ($('#workspaceMenu').hidden ? openWorkspaceMenu() : closeWorkspaceMenu());
 $('#workspaceMenu').onclick = e => {
   if (e.target.closest('[data-new-workspace]')) {

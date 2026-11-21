@@ -14,7 +14,7 @@ pub const DB_FILE: &str = "clankban.sqlite";
 pub const SCHEMA_VERSION: &str = "1.1";
 pub const DEFAULT_WORKSPACE: &str = "default";
 
-const SELECT_COLUMNS: &str = "id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id";
+const SELECT_COLUMNS: &str = "id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Subtask {
@@ -39,6 +39,8 @@ pub struct Task {
     #[serde(rename = "parentId")]
     pub parent_id: Option<String>,
     pub workspace: String,
+    /// Project documents this task relates to, as paths relative to the project folder.
+    pub docs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,6 +49,9 @@ pub struct Workspace {
     pub name: String,
     pub created: String,
     pub tasks: i64,
+    /// Absolute path of the project folder, when one is set. Read-only for the board.
+    #[serde(rename = "projectRoot")]
+    pub project_root: Option<String>,
 }
 
 /// Who made a change. `kind` is "human" (the board), "agent" (an MCP client), or "api".
@@ -229,6 +234,10 @@ fn row_to_task(row: &Row) -> rusqlite::Result<Task> {
             .get::<_, Option<String>>(11)?
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_WORKSPACE.into()),
+        docs: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -302,6 +311,14 @@ fn build_task(
         _ => Vec::new(),
     };
 
+    let docs = match merged.get("docs") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+
     Ok(Task {
         id: id.to_string(),
         title,
@@ -315,6 +332,7 @@ fn build_task(
         subtasks,
         parent_id: text("parentId"),
         workspace: text("workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into()),
+        docs,
     })
 }
 
@@ -334,6 +352,12 @@ fn diff_tasks(old: &Task, new: &Task) -> Map<String, Value> {
     note("due", json!(old.due), json!(new.due));
     note("parentId", json!(old.parent_id), json!(new.parent_id));
     note("workspace", json!(old.workspace), json!(new.workspace));
+    if old.docs != new.docs {
+        changes.insert(
+            "docs".into(),
+            json!({ "from": old.docs.join(", "), "to": new.docs.join(", ") }),
+        );
+    }
     if old.subtasks != new.subtasks {
         let done = |t: &Task| t.subtasks.iter().filter(|s| s.done).count();
         changes.insert(
@@ -464,12 +488,14 @@ impl Store {
                 subtasks TEXT NOT NULL DEFAULT '[]',
                 updated TEXT NOT NULL,
                 parent_id TEXT,
-                workspace_id TEXT NOT NULL DEFAULT 'default'
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                docs TEXT NOT NULL DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS workspaces (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                created TEXT NOT NULL
+                created TEXT NOT NULL,
+                project_root TEXT
             );
             CREATE TABLE IF NOT EXISTS task_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -506,6 +532,19 @@ impl Store {
         }
         if !columns.iter().any(|n| n == "workspace_id") {
             conn.execute_batch("ALTER TABLE tasks ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';")?;
+        }
+        if !columns.iter().any(|n| n == "docs") {
+            conn.execute_batch("ALTER TABLE tasks ADD COLUMN docs TEXT NOT NULL DEFAULT '[]';")?;
+        }
+        let workspace_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(workspaces)")?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            names
+        };
+        if !workspace_columns.iter().any(|n| n == "project_root") {
+            conn.execute_batch("ALTER TABLE workspaces ADD COLUMN project_root TEXT;")?;
         }
 
         conn.execute(
@@ -556,12 +595,13 @@ impl Store {
             return Err(ApiError::BadRequest(format!("Unknown workspace: {}", task.workspace)));
         }
         let subtasks = serde_json::to_string(&task.subtasks).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let docs = serde_json::to_string(&task.docs).map_err(|e| ApiError::Internal(e.to_string()))?;
         conn.execute(
-            "INSERT INTO tasks (id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO tasks (id, title, description, type, priority, status, due, created, subtasks, updated, parent_id, workspace_id, docs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 task.id, task.title, task.description, task.kind, task.priority, task.status,
-                task.due, task.created, subtasks, task.updated, task.parent_id, task.workspace
+                task.due, task.created, subtasks, task.updated, task.parent_id, task.workspace, docs
             ],
         )?;
         record_history(&conn, &task.id, "created", actor, &Map::new())?;
@@ -576,13 +616,14 @@ impl Store {
             return Err(ApiError::BadRequest(format!("Unknown workspace: {}", task.workspace)));
         }
         let subtasks = serde_json::to_string(&task.subtasks).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let docs = serde_json::to_string(&task.docs).map_err(|e| ApiError::Internal(e.to_string()))?;
         conn.execute(
             "UPDATE tasks SET title = ?2, description = ?3, type = ?4, priority = ?5, status = ?6,
-                due = ?7, subtasks = ?8, updated = ?9, parent_id = ?10, workspace_id = ?11
+                due = ?7, subtasks = ?8, updated = ?9, parent_id = ?10, workspace_id = ?11, docs = ?12
              WHERE id = ?1",
             params![
                 id, task.title, task.description, task.kind, task.priority, task.status,
-                task.due, subtasks, task.updated, task.parent_id, task.workspace
+                task.due, subtasks, task.updated, task.parent_id, task.workspace, docs
             ],
         )?;
         let changes = diff_tasks(&old, &task);
@@ -618,15 +659,46 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT w.id, w.name, w.created,
-                    (SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id)
+                    (SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id),
+                    w.project_root
              FROM workspaces w ORDER BY w.created ASC, w.name ASC",
         )?;
         let workspaces = stmt
             .query_map([], |row| {
-                Ok(Workspace { id: row.get(0)?, name: row.get(1)?, created: row.get(2)?, tasks: row.get(3)? })
+                Ok(Workspace {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created: row.get(2)?,
+                    tasks: row.get(3)?,
+                    project_root: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
+                })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(workspaces)
+    }
+
+    /// The project folder a workspace's documents are read from. `None` clears it.
+    /// The path is checked to be an existing folder and stored in its absolute form.
+    pub fn set_project_root(&self, id: &str, root: Option<&str>) -> Result<Option<String>, ApiError> {
+        let conn = self.lock();
+        if !workspace_exists(&conn, id)? {
+            return Err(ApiError::NotFound);
+        }
+        let stored = match root.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(path) => Some(crate::docs::validate_root(path).map_err(ApiError::BadRequest)?),
+            None => None,
+        };
+        conn.execute("UPDATE workspaces SET project_root = ?2 WHERE id = ?1", params![id, stored])?;
+        Ok(stored)
+    }
+
+    pub fn project_root(&self, id: &str) -> Result<Option<String>, ApiError> {
+        let conn = self.lock();
+        let root: Option<String> = conn
+            .query_row("SELECT project_root FROM workspaces WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or(ApiError::NotFound)?;
+        Ok(root.filter(|s| !s.is_empty()))
     }
 
     /// The id is derived from the name ("Home renovation" → "home-renovation").
@@ -648,7 +720,7 @@ impl Store {
             "INSERT INTO workspaces (id, name, created) VALUES (?1, ?2, ?3)",
             params![id, name, created],
         )?;
-        Ok(Workspace { id, name: name.into(), created, tasks: 0 })
+        Ok(Workspace { id, name: name.into(), created, tasks: 0, project_root: None })
     }
 
     pub fn rename_workspace(&self, id: &str, name: &str) -> Result<(), ApiError> {
@@ -1005,5 +1077,37 @@ mod tests {
         let _ = Store::open(&dir).unwrap();
         assert_eq!(std::fs::read_dir(dir.join("backups")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_docs_are_stored_and_changes_are_recorded() {
+        let store = Store::open_in_memory().unwrap();
+        let task = store
+            .create(&obj(json!({ "title": "Doc task", "docs": ["docs/TASKS.md", "README.md"] })), &who())
+            .unwrap();
+        assert_eq!(task.docs, ["docs/TASKS.md", "README.md"]);
+        store.update(&task.id, &obj(json!({ "docs": ["docs/ARCHITECTURE.md"] })), &who()).unwrap();
+        let history = store.history(&task.id).unwrap();
+        assert_eq!(history[0].changes["docs"]["to"], "docs/ARCHITECTURE.md");
+        assert_eq!(store.get(&task.id).unwrap().unwrap().docs, ["docs/ARCHITECTURE.md"]);
+    }
+
+    #[test]
+    fn project_folder_is_stored_for_a_workspace_and_must_exist() {
+        let store = Store::open_in_memory().unwrap();
+        let folder = std::env::temp_dir();
+        let stored = store
+            .set_project_root(DEFAULT_WORKSPACE, Some(folder.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.project_root(DEFAULT_WORKSPACE).unwrap().as_deref(), Some(stored.as_str()));
+        let default = store.list_workspaces().unwrap().into_iter().find(|w| w.id == DEFAULT_WORKSPACE).unwrap();
+        assert_eq!(default.project_root.as_deref(), Some(stored.as_str()));
+        assert!(matches!(
+            store.set_project_root(DEFAULT_WORKSPACE, Some("/definitely/not/a/folder")),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert_eq!(store.set_project_root(DEFAULT_WORKSPACE, None).unwrap(), None);
+        assert_eq!(store.project_root(DEFAULT_WORKSPACE).unwrap(), None);
     }
 }

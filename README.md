@@ -62,6 +62,7 @@ The bridge exposes `get_agent_context`, `get_task`, `create_task`, and `update_t
 - Epics, tasks, subtasks, and bug fixes with stable `AT-###` identifiers.
 - Create, edit, inspect, delete, search, sort, and complete subtasks.
 - Separate workspaces for different projects. Switch between them in the sidebar; agents can target one with the `workspace` argument.
+- Project docs tab: a read-only reader for the Markdown in the workspace's project folder. Tasks link to the documents they relate to. Agents can list and read the same files through the MCP bridge.
 - Change history on every task: who made each change (the board, an API client, or an agent), the model they reported, the fields that changed, and when. Shown in the task drawer.
 - "Copy agent JSON" view exposing a canonical, machine-readable board snapshot.
 - Local SQLite persistence and a loopback API at `127.0.0.1` for desktop and headless use.

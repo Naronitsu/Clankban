@@ -19,6 +19,7 @@ use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::docs;
 use crate::skills;
 use crate::store::{Actor, ApiError, Store, DEFAULT_WORKSPACE};
 
@@ -149,6 +150,43 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
         };
     }
 
+    // Project folder: read-only views of its Markdown, plus setting the folder itself.
+    if let Some(rest) = path.strip_prefix("/api/workspaces/") {
+        if let Some(raw) = rest.strip_suffix("/project") {
+            if method == "PUT" {
+                let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+                return match parse_body(body) {
+                    Ok(input) => {
+                        let root = input.get("root").and_then(Value::as_str);
+                        match store.set_project_root(&id, root) {
+                            Ok(_) => match store.list_workspaces() {
+                                Ok(all) => (StatusCode::OK, json!({ "workspaces": all })),
+                                Err(e) => workspace_error(e),
+                            },
+                            Err(e) => workspace_error(e),
+                        }
+                    }
+                    Err(response) => response,
+                };
+            }
+        }
+        if let Some(raw) = rest.strip_suffix("/docs") {
+            if method == "GET" {
+                let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+                return project_docs(store, &id);
+            }
+        }
+        if let Some(raw) = rest.strip_suffix("/docs/read") {
+            if method == "GET" {
+                let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+                let Some(doc) = query_param(query, "path") else {
+                    return error(ApiError::BadRequest("path is required".into()));
+                };
+                return project_doc(store, &id, &doc);
+            }
+        }
+    }
+
     if let Some(raw_id) = path.strip_prefix("/api/workspaces/") {
         let id = percent_decode_str(raw_id).decode_utf8_lossy().into_owned();
         return match method {
@@ -199,6 +237,36 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
     }
 
     (StatusCode::NOT_FOUND, json!({ "error": "Route not found" }))
+}
+
+/// Lists the Markdown files in a workspace's project folder.
+fn project_docs(store: &Store, workspace: &str) -> (StatusCode, Value) {
+    match store.project_root(workspace) {
+        Ok(Some(root)) => match docs::scan(std::path::Path::new(&root)) {
+            Ok(files) => (StatusCode::OK, json!({ "root": root, "docs": files })),
+            Err(message) => (StatusCode::BAD_REQUEST, json!({ "error": message })),
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            json!({ "error": "No project folder is set for this workspace" }),
+        ),
+        Err(e) => workspace_error(e),
+    }
+}
+
+/// Reads one Markdown file from a workspace's project folder.
+fn project_doc(store: &Store, workspace: &str, relative: &str) -> (StatusCode, Value) {
+    match store.project_root(workspace) {
+        Ok(Some(root)) => match docs::read(std::path::Path::new(&root), relative) {
+            Ok(content) => (StatusCode::OK, json!({ "path": relative, "content": content })),
+            Err(message) => (StatusCode::BAD_REQUEST, json!({ "error": message })),
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            json!({ "error": "No project folder is set for this workspace" }),
+        ),
+        Err(e) => workspace_error(e),
+    }
 }
 
 fn create_run(store: &Store, input: &Map<String, Value>) -> (StatusCode, Value) {

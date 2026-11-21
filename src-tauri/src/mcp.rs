@@ -145,6 +145,24 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             http("PATCH", task_url(base, &id), Some(patch), identity).await
         }
         "list_workspaces" => http("GET", format!("{base}/api/workspaces"), None, Vec::new()).await,
+        "list_project_docs" => {
+            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
+            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            http("GET", format!("{base}/api/workspaces/{encoded}/docs"), None, Vec::new()).await
+        }
+        "read_project_doc" => {
+            let path = required_str(&args, "path")?;
+            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
+            let encoded_workspace = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
+            http(
+                "GET",
+                format!("{base}/api/workspaces/{encoded_workspace}/docs/read?path={encoded_path}"),
+                None,
+                Vec::new(),
+            )
+            .await
+        }
         "create_workspace" => {
             let name = required_str(&args, "name")?;
             http("POST", format!("{base}/api/workspaces"), Some(json!({ "name": name })), identity).await
@@ -279,6 +297,7 @@ fn tool_definitions() -> Value {
                     "status": { "type": "string", "enum": ["backlog", "progress", "review", "done"] },
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
+                    "docs": { "type": "array", "items": { "type": "string" }, "description": "Project Markdown files this task relates to, relative to the project folder, for example docs/TASKS.md" },
                     "workspace": { "type": "string" },
                     "model": { "type": "string" },
                     "subtasks": {
@@ -306,6 +325,7 @@ fn tool_definitions() -> Value {
                     "status": { "type": "string" },
                     "due": { "type": "string" },
                     "parentId": { "type": "string" },
+                    "docs": { "type": "array", "items": { "type": "string" }, "description": "Project Markdown files this task relates to, relative to the project folder, for example docs/TASKS.md" },
                     "workspace": { "type": "string", "description": "Move the task to this workspace" },
                     "subtasks": {
                         "type": "array",
@@ -319,6 +339,26 @@ fn tool_definitions() -> Value {
                     "model": { "type": "string" }
                 },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "list_project_docs",
+            "description": "List the Markdown files in the project folder connected to a workspace. Paths are relative to the project folder. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "workspace": { "type": "string", "description": "Defaults to \"default\"" } }
+            }
+        },
+        {
+            "name": "read_project_doc",
+            "description": "Read one Markdown file from the project folder connected to a workspace. Pass a path from list_project_docs. Read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative path, for example docs/ARCHITECTURE.md" },
+                    "workspace": { "type": "string", "description": "Defaults to \"default\"" }
+                },
+                "required": ["path"]
             }
         },
         {
@@ -392,7 +432,7 @@ mod tests {
     #[test]
     fn tool_list_includes_workspace_and_history_tools() {
         let names = names();
-        for expected in ["list_workspaces", "create_workspace", "get_task_history"] {
+        for expected in ["list_workspaces", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
     }

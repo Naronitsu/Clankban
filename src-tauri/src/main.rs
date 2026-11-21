@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod api;
+mod docs;
 mod mcp;
 mod skills;
 mod store;
@@ -52,7 +53,8 @@ fn main() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![check_for_update, install_update])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![check_for_update, install_update, pick_project_folder])
         .setup(|app| {
             let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
 
@@ -181,4 +183,21 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     app.restart();
+}
+
+/// Opens the system folder chooser and returns the chosen folder, or `None` if cancelled.
+/// Only the path comes back. Saving it on a workspace goes through the API, and the board never writes to the folder.
+#[tauri::command]
+async fn pick_project_folder(app: AppHandle) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog()
+            .file()
+            .set_title("Choose the project folder")
+            .blocking_pick_folder()
+            .and_then(|path| path.into_path().ok())
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())
 }

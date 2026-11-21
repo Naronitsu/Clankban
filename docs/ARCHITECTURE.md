@@ -69,6 +69,7 @@ The current SQLite `tasks` table contains:
 | `updated` | ISO timestamp for the latest mutation. |
 | `parent_id` | Optional stable ID of a parent task. |
 | `workspace_id` | The workspace the task belongs to. Defaults to `default`. |
+| `docs` | JSON array of Markdown paths, relative to the project folder, that the task relates to. |
 
 `workspaces` holds `id`, `name`, and `created`. The `default` workspace always exists and cannot be deleted. A workspace can only be deleted once it has no tasks.
 
@@ -98,6 +99,9 @@ Base URL: `http://127.0.0.1:4187`
 | POST | `/api/workspaces` | Create a workspace. Body: `{name}`. The id is derived from the name. |
 | PATCH | `/api/workspaces/:id` | Rename a workspace. Body: `{name}`. |
 | DELETE | `/api/workspaces/:id` | Delete an empty workspace. The default workspace cannot be deleted. |
+| PUT | `/api/workspaces/:id/project` | Set or clear the workspace's project folder. Body: `{root}`, or `{root: null}` to clear. Used by the board's folder picker. |
+| GET | `/api/workspaces/:id/docs` | List the Markdown files in the project folder: relative path, first heading, size. |
+| GET | `/api/workspaces/:id/docs/read?path=` | Read one Markdown file. Paths outside the folder, non-Markdown files, and files over 1 MB are refused. |
 | GET | `/api/skills` | List the built-in agent skills (name, description, arguments). |
 | GET | `/api/run-requests?status=pending` | List skill run requests, oldest first. `status` is optional. |
 | POST | `/api/run-requests` | Ask a connected agent to run a skill. Body: `{skill, arguments}`. Unknown skills and missing required arguments return 400. |
@@ -115,6 +119,13 @@ The local stdio server exposes:
 - `create_task(title, description?, type?, priority?, status?, due?, parentId?, subtasks?, workspace?, model?)`.
 - `update_task(id, title?, description?, priority?, status?, due?, parentId?, workspace?, model?)`. Setting `workspace` moves the task.
 - `list_workspaces()` and `create_workspace(name, model?)`.
+- `list_project_docs(workspace?)` and `read_project_doc(path, workspace?)`. Read-only views of the workspace's project folder.
+
+## Project docs
+
+Each workspace can point at a project folder, chosen by a person through the board's folder picker. The board and the agent tools only read from it, and never write to it. Reads are confined to the folder: paths are relative, `..` and absolute paths are refused, symbolic links are not followed, and only `.md` files are returned. Folders such as `node_modules`, `target`, `dist`, and hidden folders are skipped.
+
+Tasks link to documents with the `docs` list. An agent passes the relevant paths when it creates or updates a task, and the task drawer shows them as links that open the document in the Docs tab. The list only points at files and never decides which files exist.
 
 The MCP client's name and version come from the handshake. The model comes from the `model` argument, which the bridge sends as a header and does not store in the task itself. Write tools record both in the task's history.
 
