@@ -382,7 +382,7 @@ fn preflight() -> Response {
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET,POST,PATCH,DELETE,OPTIONS"),
+        HeaderValue::from_static("GET,POST,PUT,PATCH,DELETE,OPTIONS"),
     );
     headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static(ALLOWED_HEADERS));
     response
