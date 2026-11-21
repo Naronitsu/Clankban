@@ -100,6 +100,8 @@ Base URL: `http://127.0.0.1:4187`
 | PATCH | `/api/workspaces/:id` | Rename a workspace. Body: `{name}`. |
 | DELETE | `/api/workspaces/:id` | Delete an empty workspace. The default workspace cannot be deleted. |
 | PUT | `/api/workspaces/:id/project` | Set or clear the workspace's project folder. Body: `{root}`, or `{root: null}` to clear. Used by the board's folder picker. |
+| PUT | `/api/workspaces/:id/suggestion` | An agent proposes a project folder. Body: `{root}`. Nothing connects until a person accepts it. |
+| DELETE | `/api/workspaces/:id/suggestion` | A person dismisses the pending suggestion. |
 | GET | `/api/workspaces/:id/docs` | List the Markdown files in the project folder: relative path, first heading, size. |
 | GET | `/api/workspaces/:id/docs/read?path=` | Read one Markdown file. Paths outside the folder, non-Markdown files, and files over 1 MB are refused. |
 | GET | `/api/skills` | List the built-in agent skills (name, description, arguments). |
@@ -120,10 +122,11 @@ The local stdio server exposes:
 - `update_task(id, title?, description?, priority?, status?, due?, parentId?, workspace?, model?)`. Setting `workspace` moves the task.
 - `list_workspaces()` and `create_workspace(name, model?)`.
 - `list_project_docs(workspace?)` and `read_project_doc(path, workspace?)`. Read-only views of the workspace's project folder.
+- `suggest_project_folder(path?, workspace?)`. Proposes a folder for the workspace. Without a path it uses the folder the bridge was started in. The Docs tab shows the proposal, and nothing connects until a person accepts it.
 
 ## Project docs
 
-Each workspace can point at a project folder, chosen by a person through the board's folder picker. The board and the agent tools only read from it, and never write to it. Reads are confined to the folder: paths are relative, `..` and absolute paths are refused, symbolic links are not followed, and only `.md` files are returned. Folders such as `node_modules`, `target`, `dist`, and hidden folders are skipped.
+Each workspace can point at a project folder. A person chooses it through the board's folder picker, or accepts a folder an agent suggested. Accepting is the only way a suggestion connects. The board and the agent tools only read from it, and never write to it. Reads are confined to the folder: paths are relative, `..` and absolute paths are refused, symbolic links are not followed, and only `.md` files are returned. Folders such as `node_modules`, `target`, `dist`, and hidden folders are skipped.
 
 Tasks link to documents with the `docs` list. An agent passes the relevant paths when it creates or updates a task, and the task drawer shows them as links that open the document in the Docs tab. The list only points at files and never decides which files exist.
 

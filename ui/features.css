@@ -191,3 +191,8 @@ html, body { height: 100%; }
 .doc-chip { border: 1px solid var(--line); background: var(--purple-soft); border-radius: 999px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; color: inherit; }
 .doc-chip:hover { border-color: var(--purple); }
 @media (max-width: 900px) { .docs-layout { grid-template-columns: 1fr; } }
+
+/* An agent's folder suggestion, waiting for a person to accept or dismiss it. */
+.suggest-banner { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 14px; border-radius: 16px; background: var(--purple-soft); border: 1px dashed var(--purple); }
+.suggest-path code { font-size: 12px; word-break: break-all; }
+.suggest-actions { display: flex; gap: 8px; }

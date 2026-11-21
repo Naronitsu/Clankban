@@ -868,8 +868,39 @@ async function openDoc(path) {
   renderDocs(true);
 }
 
+function renderSuggestion() {
+  const box = $('#docsSuggestion');
+  if (!box) return;
+  const current = currentWorkspace();
+  if (!remoteMode || !current?.suggestedRoot || current.suggestedRoot === current.projectRoot) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = `<div class="suggest-banner">
+      <div>
+        <strong>${escapeHtml(current.suggestedBy || 'An agent')}</strong> suggests this project folder
+        <div class="suggest-path"><code>${escapeHtml(current.suggestedRoot)}</code></div>
+      </div>
+      <div class="suggest-actions">
+        <button class="button primary" data-accept-suggestion>Use this folder</button>
+        <button class="button quiet" data-dismiss-suggestion>Dismiss</button>
+      </div>
+    </div>`;
+}
+
+async function dismissSuggestion() {
+  try {
+    const result = await apiRequest(`/api/workspaces/${enc(workspace)}/suggestion`, { method: 'DELETE' });
+    workspaces = result.workspaces;
+    render();
+  } catch (error) {
+    alert(`Could not dismiss the suggestion: ${errorText(error)}`);
+  }
+}
+
 function renderDocs(force = false) {
-  const box = $('#docsView');
+  renderSuggestion();
+  const box = $('#docsBody');
   if (!box) return;
   // Keep typing in the filter undisturbed by the five-second refresh.
   if (!force && document.activeElement?.id === 'docsSearch') return;
@@ -1041,6 +1072,12 @@ document.addEventListener('click', e => {
   if (doc) return openDoc(doc.dataset.doc);
   const chip = e.target.closest('[data-open-doc]');
   if (chip) return openLinkedDoc(chip.dataset.openDoc);
+  const accept = e.target.closest('[data-accept-suggestion]');
+  if (accept) {
+    const current = currentWorkspace();
+    if (current?.suggestedRoot) return setProjectFolder(current.suggestedRoot);
+  }
+  if (e.target.closest('[data-dismiss-suggestion]')) return dismissSuggestion();
   if (e.target.closest('[data-doc-folder]')) return chooseProjectFolder();
   if (e.target.closest('[data-doc-clear]') && confirm('Disconnect the project folder? Its files stay where they are.')) {
     return setProjectFolder(null);

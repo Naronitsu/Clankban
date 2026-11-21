@@ -152,6 +152,34 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
 
     // Project folder: read-only views of its Markdown, plus setting the folder itself.
     if let Some(rest) = path.strip_prefix("/api/workspaces/") {
+        // An agent proposes a folder (PUT); a person dismisses the proposal (DELETE).
+        if let Some(raw) = rest.strip_suffix("/suggestion") {
+            let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+            match method {
+                "PUT" => {
+                    return match parse_body(body) {
+                        Ok(input) => {
+                            let folder = input.get("root").and_then(Value::as_str).unwrap_or("");
+                            match store.suggest_project_root(&id, folder, &actor.label()) {
+                                Ok(_) => match store.list_workspaces() {
+                                    Ok(all) => (StatusCode::OK, json!({ "workspaces": all })),
+                                    Err(e) => workspace_error(e),
+                                },
+                                Err(e) => workspace_error(e),
+                            }
+                        }
+                        Err(response) => response,
+                    };
+                }
+                "DELETE" => {
+                    return match store.dismiss_suggestion(&id).and_then(|_| store.list_workspaces()) {
+                        Ok(all) => (StatusCode::OK, json!({ "workspaces": all })),
+                        Err(e) => workspace_error(e),
+                    };
+                }
+                _ => {}
+            }
+        }
         if let Some(raw) = rest.strip_suffix("/project") {
             if method == "PUT" {
                 let id = percent_decode_str(raw).decode_utf8_lossy().into_owned();

@@ -52,6 +52,12 @@ pub struct Workspace {
     /// Absolute path of the project folder, when one is set. Read-only for the board.
     #[serde(rename = "projectRoot")]
     pub project_root: Option<String>,
+    /// A folder an agent proposed. Only a person can accept it, which connects it.
+    #[serde(rename = "suggestedRoot")]
+    pub suggested_root: Option<String>,
+    /// Who proposed the folder, for example "claude-code 2.1.0 (claude-haiku-5-5)".
+    #[serde(rename = "suggestedBy")]
+    pub suggested_by: Option<String>,
 }
 
 /// Who made a change. `kind` is "human" (the board), "agent" (an MCP client), or "api".
@@ -495,7 +501,9 @@ impl Store {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 created TEXT NOT NULL,
-                project_root TEXT
+                project_root TEXT,
+                suggested_root TEXT,
+                suggested_by TEXT
             );
             CREATE TABLE IF NOT EXISTS task_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -545,6 +553,12 @@ impl Store {
         };
         if !workspace_columns.iter().any(|n| n == "project_root") {
             conn.execute_batch("ALTER TABLE workspaces ADD COLUMN project_root TEXT;")?;
+        }
+        if !workspace_columns.iter().any(|n| n == "suggested_root") {
+            conn.execute_batch("ALTER TABLE workspaces ADD COLUMN suggested_root TEXT;")?;
+        }
+        if !workspace_columns.iter().any(|n| n == "suggested_by") {
+            conn.execute_batch("ALTER TABLE workspaces ADD COLUMN suggested_by TEXT;")?;
         }
 
         conn.execute(
@@ -660,7 +674,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT w.id, w.name, w.created,
                     (SELECT COUNT(*) FROM tasks t WHERE t.workspace_id = w.id),
-                    w.project_root
+                    w.project_root, w.suggested_root, w.suggested_by
              FROM workspaces w ORDER BY w.created ASC, w.name ASC",
         )?;
         let workspaces = stmt
@@ -671,6 +685,8 @@ impl Store {
                     created: row.get(2)?,
                     tasks: row.get(3)?,
                     project_root: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
+                    suggested_root: row.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
+                    suggested_by: row.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -688,8 +704,40 @@ impl Store {
             Some(path) => Some(crate::docs::validate_root(path).map_err(ApiError::BadRequest)?),
             None => None,
         };
-        conn.execute("UPDATE workspaces SET project_root = ?2 WHERE id = ?1", params![id, stored])?;
+        // Connecting a folder also clears any suggestion that was waiting for an answer.
+        conn.execute(
+            "UPDATE workspaces SET project_root = ?2, suggested_root = NULL, suggested_by = NULL WHERE id = ?1",
+            params![id, stored],
+        )?;
         Ok(stored)
+    }
+
+    /// An agent proposes a project folder. The board shows the proposal, and nothing connects
+    /// until a person accepts it. The folder must exist. A new suggestion replaces the old one.
+    pub fn suggest_project_root(&self, id: &str, root: &str, by: &str) -> Result<String, ApiError> {
+        let conn = self.lock();
+        if !workspace_exists(&conn, id)? {
+            return Err(ApiError::NotFound);
+        }
+        let stored = crate::docs::validate_root(root.trim()).map_err(ApiError::BadRequest)?;
+        conn.execute(
+            "UPDATE workspaces SET suggested_root = ?2, suggested_by = ?3 WHERE id = ?1",
+            params![id, stored, by],
+        )?;
+        Ok(stored)
+    }
+
+    /// Removes a pending suggestion. The connected folder is left as it is.
+    pub fn dismiss_suggestion(&self, id: &str) -> Result<(), ApiError> {
+        let conn = self.lock();
+        if !workspace_exists(&conn, id)? {
+            return Err(ApiError::NotFound);
+        }
+        conn.execute(
+            "UPDATE workspaces SET suggested_root = NULL, suggested_by = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 
     pub fn project_root(&self, id: &str) -> Result<Option<String>, ApiError> {
@@ -720,7 +768,15 @@ impl Store {
             "INSERT INTO workspaces (id, name, created) VALUES (?1, ?2, ?3)",
             params![id, name, created],
         )?;
-        Ok(Workspace { id, name: name.into(), created, tasks: 0, project_root: None })
+        Ok(Workspace {
+            id,
+            name: name.into(),
+            created,
+            tasks: 0,
+            project_root: None,
+            suggested_root: None,
+            suggested_by: None,
+        })
     }
 
     pub fn rename_workspace(&self, id: &str, name: &str) -> Result<(), ApiError> {
@@ -1090,6 +1146,44 @@ mod tests {
         let history = store.history(&task.id).unwrap();
         assert_eq!(history[0].changes["docs"]["to"], "docs/ARCHITECTURE.md");
         assert_eq!(store.get(&task.id).unwrap().unwrap().docs, ["docs/ARCHITECTURE.md"]);
+    }
+
+    #[test]
+    fn suggestion_waits_for_acceptance_and_can_be_dismissed() {
+        let store = Store::open_in_memory().unwrap();
+        let folder = std::env::temp_dir();
+        let proposed = store
+            .suggest_project_root(DEFAULT_WORKSPACE, folder.to_str().unwrap(), "claude-code")
+            .unwrap();
+        let before = store.list_workspaces().unwrap().into_iter().find(|w| w.id == DEFAULT_WORKSPACE).unwrap();
+        assert_eq!(before.suggested_root.as_deref(), Some(proposed.as_str()));
+        assert_eq!(before.suggested_by.as_deref(), Some("claude-code"));
+        assert_eq!(before.project_root, None, "a suggestion must not connect the folder");
+
+        store.dismiss_suggestion(DEFAULT_WORKSPACE).unwrap();
+        let dismissed = store.list_workspaces().unwrap().into_iter().find(|w| w.id == DEFAULT_WORKSPACE).unwrap();
+        assert_eq!(dismissed.suggested_root, None);
+    }
+
+    #[test]
+    fn accepting_a_folder_clears_the_suggestion() {
+        let store = Store::open_in_memory().unwrap();
+        let folder = std::env::temp_dir();
+        store.suggest_project_root(DEFAULT_WORKSPACE, folder.to_str().unwrap(), "claude-code").unwrap();
+        store.set_project_root(DEFAULT_WORKSPACE, Some(folder.to_str().unwrap())).unwrap();
+        let w = store.list_workspaces().unwrap().into_iter().find(|w| w.id == DEFAULT_WORKSPACE).unwrap();
+        assert!(w.project_root.is_some());
+        assert_eq!(w.suggested_root, None);
+        assert_eq!(w.suggested_by, None);
+    }
+
+    #[test]
+    fn suggestion_must_be_an_existing_folder() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(matches!(
+            store.suggest_project_root(DEFAULT_WORKSPACE, "/no/such/folder", "agent"),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 
     #[test]

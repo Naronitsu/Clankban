@@ -145,6 +145,25 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             http("PATCH", task_url(base, &id), Some(patch), identity).await
         }
         "list_workspaces" => http("GET", format!("{base}/api/workspaces"), None, Vec::new()).await,
+        "suggest_project_folder" => {
+            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
+            // Without a path, suggest the folder the bridge was started in: the project the agent is working on.
+            let folder = match args.get("path").and_then(Value::as_str) {
+                Some(path) => path.to_string(),
+                None => std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            http(
+                "PUT",
+                format!("{base}/api/workspaces/{encoded}/suggestion"),
+                Some(json!({ "root": folder })),
+                identity,
+            )
+            .await
+        }
         "list_project_docs" => {
             let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
             let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
@@ -339,6 +358,17 @@ fn tool_definitions() -> Value {
                     "model": { "type": "string" }
                 },
                 "required": ["id"]
+            }
+        },
+        {
+            "name": "suggest_project_folder",
+            "description": "Suggest the project folder for a workspace, so the board can show its documents. Nothing connects until a person accepts the suggestion in the Docs tab. Without a path, suggests the folder this bridge was started in.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the project folder. Optional." },
+                    "workspace": { "type": "string", "description": "Defaults to \"default\"" }
+                }
             }
         },
         {
