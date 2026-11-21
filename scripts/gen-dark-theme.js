@@ -17,9 +17,26 @@ function stripComments(css) {
   return css.replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
-// Layout-only media queries are skipped: they set no colours.
+// At-rules (media queries and keyframes) are skipped: they set no colours of their own.
+// Their braces are matched by counting, so nested blocks are handled.
 function stripMedia(css) {
-  return css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+  let out = "";
+  let i = 0;
+  while (i < css.length) {
+    const at = css.indexOf("@", i);
+    if (at < 0) { out += css.slice(i); break; }
+    out += css.slice(i, at);
+    const open = css.indexOf("{", at);
+    if (open < 0) break;
+    let depth = 0;
+    let j = open;
+    for (; j < css.length; j++) {
+      if (css[j] === "{") depth++;
+      else if (css[j] === "}") { depth--; if (depth === 0) break; }
+    }
+    i = j + 1;
+  }
+  return out;
 }
 
 function parseRules(css) {

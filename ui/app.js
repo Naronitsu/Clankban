@@ -291,12 +291,17 @@ function renderStats() {
   $('#navAgentCount').textContent = runRequests.filter(r => r.status === 'pending').length;
 }
 
+// Cards that have been shown before do not animate again, so the five-second refresh stays still.
+const shownCards = new Set();
+
 function card(t) {
+  const fresh = !shownCards.has(t.id);
+  shownCards.add(t.id);
   const subtasks = t.subtasks || [];
   const children = tasks.filter(x => x.parentId === t.id);
   const done = subtasks.filter(s => s.done).length + children.filter(x => x.status === 'done').length;
   const total = subtasks.length + children.length;
-  return `<article class="task-card" data-id="${escapeHtml(t.id)}"><div class="card-top"><span class="type-badge ${t.type}">${typeLabel(t)}</span><span class="priority ${t.priority}" title="${t.priority} priority"></span></div><h3>${escapeHtml(t.title)}</h3><p>${escapeHtml(t.description)}</p><div class="card-bottom"><span class="card-id">${escapeHtml(t.id)}</span><div class="card-meta">${total ? `<span class="subtask-chip">□ ${done}/${total}</span>` : ''}<span class="${t.due && t.status !== 'done' ? 'due-soon' : ''}">${formatDate(t.due)}</span></div></div></article>`;
+  return `<article class="task-card${fresh ? ' is-new' : ''}" data-id="${escapeHtml(t.id)}"><div class="card-top"><span class="type-badge ${t.type}">${typeLabel(t)}</span><span class="priority ${t.priority}" title="${t.priority} priority"></span></div><h3>${escapeHtml(t.title)}</h3><p>${escapeHtml(t.description)}</p><div class="card-bottom"><span class="card-id">${escapeHtml(t.id)}</span><div class="card-meta">${total ? `<span class="subtask-chip">□ ${done}/${total}</span>` : ''}<span class="${t.due && t.status !== 'done' ? 'due-soon' : ''}">${formatDate(t.due)}</span></div></div></article>`;
 }
 
 function renderBoard(list) {

@@ -77,3 +77,58 @@ body {
 .priority.high { background: var(--coral); }
 .priority.medium { background: var(--orange); }
 .priority.low { background: var(--green); }
+
+/* Motion. Everything in this block is skipped when the system asks for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes drawer-in {
+    from { opacity: 0; transform: translateX(28px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(8px) scale(0.96); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.4); }
+  }
+  @keyframes wiggle {
+    0%, 100% { transform: rotate(0); }
+    25% { transform: rotate(-9deg); }
+    75% { transform: rotate(9deg); }
+  }
+
+  .task-card.is-new { animation: rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  .task-drawer.open { animation: drawer-in 0.35s ease both; }
+  .modal-backdrop.open .task-modal,
+  .json-modal-backdrop.open .json-modal,
+  .palette-backdrop.open .palette { animation: pop 0.25s ease both; }
+  .modal-backdrop.open,
+  .json-modal-backdrop.open,
+  .palette-backdrop.open,
+  .drawer-backdrop.open { animation: fade 0.2s ease both; }
+  .ws-menu:not([hidden]) { animation: pop 0.2s ease both; }
+
+  .board-column:nth-child(2) .column-heading::before { display: inline-block; animation: breathe 2.4s ease-in-out infinite; }
+
+  .button { transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.2s ease; }
+  .button:hover { transform: translateY(-1px); }
+  .button:active { transform: scale(0.97); }
+
+  .nav-item { transition: background-color 0.2s ease, transform 0.2s ease; }
+  .nav-item:hover { transform: translateX(3px); }
+
+  .stat-card { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+  .stat-card:hover { transform: translateY(-2px); }
+
+  .brand-mark:hover { animation: wiggle 0.5s ease; }
+  .ws-button { transition: background-color 0.2s ease, border-color 0.2s ease; }
+}
