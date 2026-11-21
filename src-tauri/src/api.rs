@@ -21,7 +21,7 @@ use serde_json::{json, Map, Value};
 
 use crate::docs;
 use crate::skills;
-use crate::store::{Actor, ApiError, Store, DEFAULT_WORKSPACE};
+use crate::store::{Actor, ApiError, BoardRequestResult, Store, DEFAULT_WORKSPACE};
 
 pub type SharedStore = Arc<Store>;
 
@@ -99,6 +99,17 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
                 StatusCode::OK,
             );
         }
+        ("GET", "/api/history") => {
+            let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
+            let limit = query_param(query, "limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(100)
+                .clamp(1, 500);
+            return reply(
+                store.recent_history(&workspace, limit).map(|history| json!({ "history": history })),
+                StatusCode::OK,
+            );
+        }
         ("GET", "/api/agent-context") => {
             let workspace = query_param(query, "workspace").unwrap_or_else(|| DEFAULT_WORKSPACE.into());
             return reply(store.agent_context(&workspace), StatusCode::OK);
@@ -112,11 +123,59 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
         ("GET", "/api/workspaces") => {
             return reply(store.list_workspaces().map(|ws| json!({ "workspaces": ws })), StatusCode::OK);
         }
+        ("GET", "/api/board-requests") => {
+            // Pending requests by default; `status=all` includes the decided ones.
+            let pending_only = query_param(query, "status").as_deref() != Some("all");
+            return reply(
+                store.list_board_requests(pending_only).map(|requests| json!({ "requests": requests })),
+                StatusCode::OK,
+            );
+        }
+        ("POST", "/api/board-requests") => {
+            // An agent asks for a board. Nothing is created until a person approves the request.
+            return match parse_body(body) {
+                Ok(input) => {
+                    let name = input.get("name").and_then(Value::as_str).unwrap_or("");
+                    let folder = input.get("path").and_then(Value::as_str);
+                    match store.request_board(name, folder, &actor.label()) {
+                        Ok(BoardRequestResult::Existing(workspace)) => {
+                            (StatusCode::OK, json!({ "waiting": false, "workspace": workspace }))
+                        }
+                        Ok(BoardRequestResult::Pending { request, is_new }) => (
+                            if is_new { StatusCode::CREATED } else { StatusCode::OK },
+                            json!({ "waiting": true, "new": is_new, "request": request }),
+                        ),
+                        Err(e) => error(e),
+                    }
+                }
+                Err(response) => response,
+            };
+        }
+        ("GET", "/api/workspace-match") => {
+            let folder = query_param(query, "folder").unwrap_or_default();
+            if folder.trim().is_empty() {
+                return error(ApiError::BadRequest("folder is required".into()));
+            }
+            // `pending` is a board that has this folder suggested but not yet accepted by a person.
+            return match store.workspace_for_folder(&folder).and_then(|found| {
+                let pending = store.workspace_claiming_folder(&folder)?.filter(|w| w.project_root.is_none());
+                store.list_workspaces().map(|all| (found, pending, all))
+            }) {
+                Ok((found, pending, all)) => (
+                    StatusCode::OK,
+                    json!({ "workspace": found, "pending": pending, "workspaces": all }),
+                ),
+                Err(e) => workspace_error(e),
+            };
+        }
         ("POST", "/api/workspaces") => {
             return match parse_body(body) {
                 Ok(input) => {
                     let name = input.get("name").and_then(Value::as_str).unwrap_or("");
-                    reply(store.create_workspace(name), StatusCode::CREATED)
+                    match input.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) {
+                        None => reply(store.create_workspace(name), StatusCode::CREATED),
+                        Some(path) => create_board_for_folder(&store, name, path, actor),
+                    }
                 }
                 Err(response) => response,
             };
@@ -236,6 +295,32 @@ fn route(store: &Store, method: &Method, target: &str, body: &[u8], actor: &Acto
         };
     }
 
+    if let Some(rest) = path.strip_prefix("/api/board-requests/") {
+        // A person decides a request on the board: POST /api/board-requests/:id/approve or /reject.
+        if method == "POST" {
+            let (raw_id, decision) = match rest.split_once('/') {
+                Some(parts) => parts,
+                None => ("", ""),
+            };
+            if let Ok(id) = raw_id.parse::<i64>() {
+                return match decision {
+                    "approve" => reply(
+                        store.approve_board_request(id).map(|(request, workspace)| {
+                            json!({ "request": request, "workspace": workspace })
+                        }),
+                        StatusCode::OK,
+                    ),
+                    "reject" => reply(
+                        store.reject_board_request(id).map(|request| json!({ "request": request })),
+                        StatusCode::OK,
+                    ),
+                    _ => error(ApiError::NotFound),
+                };
+            }
+        }
+        return error(ApiError::NotFound);
+    }
+
     if let Some(rest) = path.strip_prefix("/api/tasks/") {
         if let Some(raw_id) = rest.strip_suffix("/history") {
             if method == "GET" && !raw_id.is_empty() && !raw_id.contains('/') {
@@ -335,6 +420,43 @@ fn reply<T: Serialize>(result: Result<T, ApiError>, ok_status: StatusCode) -> (S
 }
 
 /// Like `error`, but says "Workspace not found" when a workspace is missing.
+/// An agent asks for a board for a project folder. A folder that already has a board gets that
+/// board back, so boards are not duplicated (`created` is false). A new board is created with the
+/// folder suggested, and a person accepts the suggestion before anything connects.
+fn create_board_for_folder(store: &Store, name: &str, path: &str, actor: &Actor) -> (StatusCode, Value) {
+    let folder = match docs::validate_root(path) {
+        Ok(folder) => folder,
+        Err(message) => return error(ApiError::BadRequest(message)),
+    };
+    match store.workspace_claiming_folder(&folder) {
+        Ok(Some(existing)) => return (StatusCode::OK, json!({ "workspace": existing, "created": false })),
+        Ok(None) => {}
+        Err(e) => return workspace_error(e),
+    }
+    let name = if name.trim().is_empty() {
+        std::path::Path::new(&folder)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Project".into())
+    } else {
+        name.to_string()
+    };
+    let created = match store.create_workspace(&name) {
+        Ok(workspace) => workspace,
+        Err(e) => return workspace_error(e),
+    };
+    if let Err(e) = store.suggest_project_root(&created.id, &folder, &actor.label()) {
+        return workspace_error(e);
+    }
+    match store.list_workspaces() {
+        Ok(all) => {
+            let workspace = all.into_iter().find(|w| w.id == created.id);
+            (StatusCode::CREATED, json!({ "workspace": workspace, "created": true }))
+        }
+        Err(e) => workspace_error(e),
+    }
+}
+
 fn workspace_error(e: ApiError) -> (StatusCode, Value) {
     match e {
         ApiError::NotFound => (StatusCode::NOT_FOUND, json!({ "error": "Workspace not found" })),

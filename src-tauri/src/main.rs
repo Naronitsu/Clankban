@@ -54,7 +54,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![check_for_update, install_update, pick_project_folder])
+        .invoke_handler(tauri::generate_handler![check_for_update, install_update, pick_project_folder, get_changelog])
         .setup(|app| {
             let store = Arc::new(Store::open(&data_dir()).map_err(|e| format!("{e:?}"))?);
 
@@ -144,30 +144,62 @@ fn run_mcp() -> Result<(), String> {
 const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(8);
 const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// The changelog bundled with this build. Each release has a `## <version>` section.
+const CHANGELOG: &str = include_str!("../../CHANGELOG.md");
+
+/// A newer release, as the page needs it: its version and its release notes.
+/// The notes come from `latest.json`, which the release script fills from CHANGELOG.md.
+#[derive(Clone, serde::Serialize)]
+struct UpdateInfo {
+    version: String,
+    notes: String,
+}
+
 /// Checks for a newer release in the background. When one exists, the page is told
-/// through the `update-available` event with the new version number.
+/// through the `update-available` event with its version and notes.
 fn spawn_update_checks(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_UPDATE_CHECK).await;
         loop {
-            if let Ok(Some(version)) = find_update(&app).await {
-                let _ = app.emit("update-available", version);
+            if let Ok(Some(info)) = find_update(&app).await {
+                let _ = app.emit("update-available", info);
             }
             tokio::time::sleep(UPDATE_CHECK_EVERY).await;
         }
     });
 }
 
-/// The version of a newer release, or `None` when this one is current.
-async fn find_update(app: &AppHandle) -> Result<Option<String>, String> {
+/// The newer release, or `None` when this one is current.
+async fn find_update(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
-    Ok(update.map(|u| u.version))
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version,
+        notes: u.body.unwrap_or_default(),
+    }))
 }
 
 #[tauri::command]
-async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
+async fn check_for_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
     find_update(&app).await
+}
+
+/// The full changelog bundled with this build, for the "What's new" view.
+#[tauri::command]
+fn get_changelog() -> String {
+    CHANGELOG.to_string()
+}
+
+#[cfg(test)]
+mod changelog_tests {
+    #[test]
+    fn changelog_has_a_section_for_this_version() {
+        let heading = format!("## {}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            super::CHANGELOG.lines().any(|line| line == heading || line.starts_with(&format!("{heading} "))),
+            "CHANGELOG.md needs a '{heading}' section before this version is released"
+        );
+    }
 }
 
 /// Downloads and installs the newest release, then restarts Clankban.

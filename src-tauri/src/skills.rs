@@ -47,6 +47,16 @@ pub const SKILLS: &[Skill] = &[
         }],
         template: include_str!("../skills/review_tasks.md"),
     },
+    Skill {
+        name: "suggest_documents",
+        description: "Read-only. Suggests which project Markdown documents belong on which board tasks. Nothing is linked until you approve it.",
+        args: &[SkillArg {
+            name: "scope",
+            description: "Optional status to focus on (backlog, progress, review, or done)",
+            required: false,
+        }],
+        template: include_str!("../skills/suggest_documents.md"),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Skill> {
@@ -102,9 +112,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_three_unique_skills() {
+    fn registry_has_four_unique_skills() {
         let names: Vec<&str> = SKILLS.iter().map(|s| s.name).collect();
-        assert_eq!(names, ["import_tasks", "update_tasks", "review_tasks"]);
+        assert_eq!(names, ["import_tasks", "update_tasks", "review_tasks", "suggest_documents"]);
+    }
+
+    #[test]
+    fn suggest_documents_is_read_only_and_takes_an_optional_scope() {
+        let skill = find("suggest_documents").unwrap();
+        assert_eq!(missing_required(skill, &json!({})), None);
+        assert!(skill.template.contains("read-only"));
+        assert!(!skill.template.contains("update_task"), "the suggestion skill must not change tasks");
     }
 
     #[test]

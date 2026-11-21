@@ -21,6 +21,8 @@ pub struct DocEntry {
     /// The first Markdown heading, or the file name if there is none.
     pub title: String,
     pub bytes: u64,
+    /// Last change, in milliseconds since the Unix epoch. The page compares it to see what changed.
+    pub modified: u64,
 }
 
 /// Turns a client-supplied relative path into a safe one. Rejects absolute paths, drive
@@ -101,7 +103,13 @@ pub fn scan(root: &Path) -> Result<Vec<DocEntry>, String> {
             if !file_type.is_file() || !is_markdown {
                 continue;
             }
-            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let metadata = entry.metadata().ok();
+            let bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = metadata
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             let title = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|text| first_heading(&text))
@@ -113,7 +121,7 @@ pub fn scan(root: &Path) -> Result<Vec<DocEntry>, String> {
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join("/");
-            found.push(DocEntry { path: relative, title, bytes });
+            found.push(DocEntry { path: relative, title, bytes, modified });
             if found.len() >= MAX_FILES {
                 break;
             }
@@ -179,6 +187,7 @@ mod tests {
         assert_eq!(paths, ["README.md", "docs/ARCHITECTURE.md"]);
         assert_eq!(docs[0].title, "Sample project");
         assert_eq!(docs[1].title, "ARCHITECTURE.md");
+        assert!(docs.iter().all(|d| d.modified > 0), "every entry needs a modified time");
         let _ = std::fs::remove_dir_all(&root);
     }
 

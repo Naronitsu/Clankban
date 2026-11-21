@@ -21,7 +21,8 @@ Clankban is a local-first desktop task workspace for humans and coding agents. R
 
 The board is the task source for this project. `docs/TASKS.md` is only a pointer to it.
 
-1. **Start of work:** call `get_agent_context` for the `default` workspace. Pick the next task by priority: `high` before `medium` before `low`. Within one priority, prefer `progress` over `backlog`. Skip `review` and `done`. Skip epics; work on their children.
+0. **Pick the right board first:** call `resolve_workspace` (or pass `workspace` explicitly). Tools use the board connected to this project folder when `workspace` is left out, and they refuse to write when no board matches. Never write to a board you have not confirmed. To get a board for a project that has none, call `create_workspace` with the project's `path`. That only files a request: a person approves it on the board, and until then nothing is created or written. A folder that already has a board gets that board back.
+1. **Start of work:** call `get_agent_context` for this project's board. Pick the next task by priority: `high` before `medium` before `low`. Within one priority, prefer `progress` over `backlog`. Skip `review` and `done`. Skip epics; work on their children.
 2. **Before starting a task:** set it to `progress` with `update_task`. Pass `model` on every write so the change history records which model made it.
 3. **While working:** keep the board current. Tick subtasks as they finish, and add a short progress note to the description when something is decided, blocked, or verified. Do not wait until the end to update.
 4. **New work you discover:** create it on the board with `create_task` before implementing it. Set `parentId` for child work and add subtasks for the steps.

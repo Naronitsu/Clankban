@@ -42,6 +42,9 @@ let formSkill = '';
 const agentDrafts = {};
 let workspaces = [];
 let projectDocs = null;
+let docsRefreshedAt = null;     // when the folder was last read
+let docsNeedsRender = false;    // a refresh changed the list while the filter had focus
+let docsRefreshing = false;
 let selectedDoc = null;
 let docBody = '';
 let docsSearch = '';
@@ -73,7 +76,7 @@ async function loadRemoteTasks() {
     if (!workspaces.some(w => w.id === workspace)) setWorkspace('default', false);
     const result = await apiRequest(`/api/tasks?workspace=${enc(workspace)}`);
     tasks = result.tasks;
-    await Promise.all([loadRunRequests(), loadSkills()]);
+    await Promise.all([loadRunRequests(), loadSkills(), loadBoardRequests()]);
     syncOk = true;
     lastSync = new Date();
     persist();
@@ -329,11 +332,78 @@ function renderList(list) {
     : '<div class="empty-note">No tasks match these filters.</div>';
 }
 
-function renderRecent(list) {
+// The Recent view has two tabs: the tasks changed most recently, and the workspace's history.
+// History entries link to their task. The feed is fetched only while its tab is open, and the
+// view is redrawn only when the feed actually changed.
+let recentTab = 'tasks';
+let recentHistory = null;             // newest first, from /api/history; { error } when it failed
+let recentHistoryKey = '';            // ids and titles of the last feed, to skip redraws
+let recentHistoryWorkspace = null;    // the workspace the feed belongs to
+let recentHistoryLoading = false;
+
+function recentTabsMarkup() {
+  const tab = (name, label) => `<button type="button" class="tab ${recentTab === name ? 'active' : ''}" role="tab" aria-selected="${recentTab === name}" data-recent-tab="${name}">${label}</button>`;
+  return `<div class="recent-tabs" role="tablist">${tab('tasks', 'Tasks')}${tab('history', 'History')}</div>`;
+}
+
+function recentTasksMarkup(list) {
   const recent = list.filter(t => Date.parse(t.updated || '')).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated)).slice(0, 50);
-  $('#recentView').innerHTML = recent.length
+  return recent.length
     ? `<ul class="recent-list">${recent.map(t => `<li data-id="${escapeHtml(t.id)}"><span><strong>${escapeHtml(t.id)}</strong> ${escapeHtml(t.title)}</span><small>${statusLabel[t.status] || t.status} · ${relativeTime(t.updated)}</small></li>`).join('')}</ul>`
     : '<div class="empty-note">No changes recorded yet. Edits made from the board or an agent appear here.</div>';
+}
+
+function recentHistoryMarkup() {
+  if (!remoteMode) return '<div class="empty-note">History needs the desktop app and its local API.</div>';
+  if (!recentHistory) return '<div class="empty-note">Loading history…</div>';
+  if (recentHistory.error) return `<div class="empty-note">Could not load history: ${escapeHtml(recentHistory.error)}</div>`;
+  if (!recentHistory.length) return '<div class="empty-note">No history yet. Changes made on the board or by an agent appear here.</div>';
+  return `<ul class="recent-list recent-history">${recentHistory.map(h => `
+    <li data-id="${escapeHtml(h.taskId)}" title="Open ${escapeHtml(h.taskId)}">
+      <span class="rh-main"><strong>${escapeHtml(h.taskTitle)}</strong><small class="rh-id">${escapeHtml(h.taskId)}</small></span>
+      <span class="rh-summary">${escapeHtml(h.summary || h.action)}</span>
+      <small class="rh-meta">${escapeHtml(h.actorName)}${h.actorModel ? ` · ${escapeHtml(h.actorModel)}` : ''} · ${relativeTime(h.at)}</small>
+    </li>`).join('')}</ul>`;
+}
+
+// Draws the view from what is already known. It never fetches, so it is safe to call on every refresh.
+function drawRecent(list) {
+  const body = recentTab === 'history' ? recentHistoryMarkup() : recentTasksMarkup(list);
+  $('#recentView').innerHTML = `${recentTabsMarkup()}<div class="recent-body">${body}</div>`;
+}
+
+// Draws the view and, on the History tab, refreshes the feed. A changed feed redraws once.
+function renderRecent(list) {
+  drawRecent(list);
+  if (recentTab === 'history') {
+    loadRecentHistory().then(changed => { if (changed && view === 'recent' && recentTab === 'history') drawRecent(visibleTasks()); });
+  }
+}
+
+// Returns true when the feed differs from what was shown before.
+async function loadRecentHistory() {
+  if (!remoteMode || !workspace || recentHistoryLoading) return false;
+  if (recentHistoryWorkspace !== workspace) {
+    recentHistoryWorkspace = workspace;
+    recentHistory = null;
+    recentHistoryKey = '';
+  }
+  recentHistoryLoading = true;
+  try {
+    const result = await apiRequest(`/api/history?workspace=${enc(workspace)}&limit=100`);
+    const key = result.history.map(h => `${h.id}:${h.taskTitle}`).join(',');
+    const changed = key !== recentHistoryKey || !Array.isArray(recentHistory);
+    recentHistory = result.history;
+    recentHistoryKey = key;
+    return changed;
+  } catch (error) {
+    const changed = !recentHistory || !recentHistory.error;
+    recentHistory = { error: errorText(error) };
+    recentHistoryKey = '';
+    return changed;
+  } finally {
+    recentHistoryLoading = false;
+  }
 }
 
 function updateSyncStatus() {
@@ -355,7 +425,55 @@ function updateSyncStatus() {
   }
 }
 
+// ---- board requests --------------------------------------------------------
+// An agent that asks for a new board files a request. Nothing is created until a person
+// approves it here.
+
+let boardRequests = [];
+
+async function loadBoardRequests() {
+  // A failure here must not mark the whole board as offline, so the banner just stays hidden.
+  try {
+    const result = await apiRequest('/api/board-requests');
+    boardRequests = result.requests;
+  } catch {
+    boardRequests = [];
+  }
+}
+
+function renderBoardRequests() {
+  const box = $('#boardRequests');
+  if (!box) return;
+  if (!remoteMode || !boardRequests.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = boardRequests.map(r => `
+    <div class="board-request">
+      <div>
+        <strong>${escapeHtml(r.requestedBy)}</strong> asks for a new board <strong>${escapeHtml(r.name)}</strong>${r.folder ? ` for <code>${escapeHtml(r.folder)}</code>` : ''}.
+        <small>Nothing is created until you approve it.</small>
+      </div>
+      <div class="board-request-actions">
+        <button class="button primary" data-approve-board="${r.id}">Create board</button>
+        <button class="button quiet" data-reject-board="${r.id}">Decline</button>
+      </div>
+    </div>`).join('');
+}
+
+async function decideBoardRequest(id, decision) {
+  try {
+    await apiRequest(`/api/board-requests/${enc(id)}/${decision}`, { method: 'POST' });
+    await loadBoardRequests();
+    await loadWorkspaces();
+    render();
+  } catch (error) {
+    alert(`Could not ${decision === 'approve' ? 'create the board' : 'decline the request'}: ${errorText(error)}`);
+  }
+}
+
 function render() {
+  renderBoardRequests();
   renderWorkspaceControls();
   const list = visibleTasks();
   renderStats();
@@ -370,7 +488,11 @@ function render() {
   if (view === 'list') renderList(list);
   if (view === 'recent') renderRecent(list);
   if (view === 'agent') renderAgent();
-  if (view === 'docs') renderDocs();
+  if (view === 'docs') {
+    renderDocs();
+    // Opening the tab reads the folder again, so the list is current before anyone looks.
+    docsAutoRefresh();
+  }
 
   const count = activeFilterCount();
   $('#filterBadge').hidden = count === 0;
@@ -765,9 +887,87 @@ const tauriEvent = window.__TAURI__?.event;
 
 function setUpdateStatus(text) { $('#updateStatus').textContent = text; }
 
-function offerUpdate(version) {
-  setUpdateStatus(`Version ${version} is available.`);
-  $('#installUpdate').textContent = `Install ${version} and restart`;
+// ---- release notes ---------------------------------------------------------
+// An update brings its notes with it (latest.json, written from CHANGELOG.md by the release
+// script). The installed build also carries the whole changelog. Notes are plain text:
+// "### " starts a heading and "- " starts a bullet.
+
+let currentVersion = '';
+let pendingUpdate = null;
+
+function renderNotes(markdown) {
+  const out = [];
+  let inList = false;
+  for (const raw of String(markdown || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith('- ')) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${escapeHtml(line.slice(2))}</li>`);
+      continue;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    if (!line) continue;
+    out.push(line.startsWith('### ')
+      ? `<h4>${escapeHtml(line.slice(4))}</h4>`
+      : `<p>${escapeHtml(line)}</p>`);
+  }
+  if (inList) out.push('</ul>');
+  return out.join('');
+}
+
+// The body of one version's section in CHANGELOG.md, without its heading line.
+function changelogSection(text, version) {
+  const lines = String(text || '').split(/\r?\n/);
+  const start = lines.findIndex(l => l === `## ${version}` || l.startsWith(`## ${version} `));
+  if (start < 0) return '';
+  const rest = lines.slice(start + 1);
+  const next = rest.findIndex(l => l.startsWith('## '));
+  return (next < 0 ? rest : rest.slice(0, next)).join('\n').trim();
+}
+
+function showNotes(title, markdown, { installable = false } = {}) {
+  $('#changelogTitle').textContent = title;
+  $('#changelogBody').innerHTML = renderNotes(markdown) || '<p>No release notes for this version.</p>';
+  const install = $('#changelogInstall');
+  install.hidden = !(installable && pendingUpdate);
+  if (!install.hidden) install.textContent = `Install ${pendingUpdate.version} and restart`;
+  $('#changelogBackdrop').classList.add('open');
+}
+
+function closeNotes() { $('#changelogBackdrop').classList.remove('open'); }
+
+// After an update, the first launch of the new version explains what changed. Builds before
+// this feature never saved a version, so the first launch after upgrading from them also shows
+// the notes. The one cost is a welcome on a fresh install.
+async function showWhatsNewAfterUpdate() {
+  if (!tauriCore || !currentVersion) return;
+  let seen = null;
+  try { seen = localStorage.getItem('clankban-seen-version'); } catch { /* storage blocked */ }
+  try { localStorage.setItem('clankban-seen-version', currentVersion); } catch { /* storage blocked */ }
+  if (seen === currentVersion) return;
+  try {
+    const text = await tauriCore.invoke('get_changelog');
+    showNotes(`What's new in ${currentVersion}`, changelogSection(text, currentVersion));
+  } catch { /* the notes are a convenience; the app works without them */ }
+}
+
+async function openWhatsNew() {
+  if (pendingUpdate) return showNotes(`Version ${pendingUpdate.version}`, pendingUpdate.notes, { installable: true });
+  if (!tauriCore) return showNotes("What's new", 'Release notes are in the installed app.');
+  try {
+    const text = await tauriCore.invoke('get_changelog');
+    showNotes(`What's new in ${currentVersion || 'this version'}`, changelogSection(text, currentVersion));
+  } catch (error) {
+    showNotes("What's new", `Could not load the notes: ${error}`);
+  }
+}
+
+// ---- updates ---------------------------------------------------------------
+
+function offerUpdate(info) {
+  pendingUpdate = info;
+  setUpdateStatus(`Version ${info.version} is available.`);
+  $('#installUpdate').textContent = `Install ${info.version} and restart`;
   $('#installUpdate').disabled = false;
   $('#installUpdate').hidden = false;
 }
@@ -779,8 +979,8 @@ async function checkForUpdates({ silent = false } = {}) {
   }
   if (!silent) setUpdateStatus('Checking…');
   try {
-    const version = await tauriCore.invoke('check_for_update');
-    if (version) offerUpdate(version);
+    const info = await tauriCore.invoke('check_for_update');
+    if (info) offerUpdate(info);
     else if (!silent) setUpdateStatus('You have the latest version.');
   } catch (error) {
     if (!silent) setUpdateStatus(`Could not check: ${error}`);
@@ -804,10 +1004,18 @@ async function installUpdate() {
 if (tauriEvent) tauriEvent.listen('update-available', event => offerUpdate(event.payload));
 if (tauriCore) setTimeout(() => checkForUpdates({ silent: true }), 4000);
 
+$('#showChangelog').onclick = openWhatsNew;
+$('#closeChangelog').onclick = closeNotes;
+$('#laterChangelog').onclick = closeNotes;
+$('#changelogInstall').onclick = () => { closeNotes(); installUpdate(); };
+$('#changelogBackdrop').addEventListener('click', e => { if (e.target.id === 'changelogBackdrop') closeNotes(); });
+
 async function showAppVersion() {
   try {
     const version = await tauriApi?.app?.getVersion?.();
+    currentVersion = version || '';
     $('#appVersion').textContent = version || 'browser build';
+    showWhatsNewAfterUpdate();
   } catch {
     $('#appVersion').textContent = 'unknown';
   }
@@ -852,9 +1060,62 @@ async function loadProjectDocs() {
   }
   try {
     projectDocs = await apiRequest(`/api/workspaces/${enc(workspace)}/docs`);
+    docsRefreshedAt = new Date();
   } catch (error) {
     projectDocs = { error: errorText(error) };
   }
+}
+
+// What changed in the folder: a file added, removed, resized, or saved again.
+function docsSignature(data) {
+  return (data?.docs || []).map(d => `${d.path}|${d.bytes}|${d.modified}`).join('\n');
+}
+
+// Re-reads the folder and, if the open document changed, its text too. Nothing is drawn
+// here: the caller decides when to render. Returns true when the page needs redrawing.
+async function refreshProjectDocs() {
+  const current = currentWorkspace();
+  if (!remoteMode || !current?.projectRoot || docsRefreshing) return false;
+  docsRefreshing = true;
+  const previous = projectDocs;
+  try {
+    const fresh = await apiRequest(`/api/workspaces/${enc(workspace)}/docs`);
+    docsRefreshedAt = new Date();
+    let changed = !previous || previous.error || previous.root !== fresh.root || docsSignature(previous) !== docsSignature(fresh);
+    projectDocs = fresh;
+    if (selectedDoc) {
+      const entry = fresh.docs.find(d => d.path === selectedDoc);
+      const before = previous?.docs?.find(d => d.path === selectedDoc);
+      if (!entry) {
+        selectedDoc = null;
+        docBody = '';
+        changed = true;
+      } else if (!before || before.modified !== entry.modified || before.bytes !== entry.bytes) {
+        const result = await apiRequest(`/api/workspaces/${enc(workspace)}/docs/read?path=${enc(selectedDoc)}`);
+        docBody = result.content;
+        changed = true;
+      }
+    }
+    return changed;
+  } catch (error) {
+    projectDocs = { error: errorText(error) };
+    return true;
+  } finally {
+    docsRefreshing = false;
+  }
+}
+
+// Background refresh while the Docs tab is open. The page is only redrawn when something changed.
+async function docsAutoRefresh() {
+  if ($('#docsView').hidden || !remoteMode) return;
+  if (await refreshProjectDocs() || docsNeedsRender) renderDocs(false);
+}
+
+async function manualDocsRefresh() {
+  const button = document.querySelector('[data-doc-refresh]');
+  if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
+  await refreshProjectDocs();
+  renderDocs(true);
 }
 
 function docGroups(docs, query) {
@@ -962,8 +1223,9 @@ function renderDocs(force = false) {
   renderSuggestion();
   const box = $('#docsBody');
   if (!box) return;
-  // Keep typing in the filter undisturbed by the five-second refresh.
-  if (!force && document.activeElement?.id === 'docsSearch') return;
+  const scroll = docsScrollPositions(box);
+  // Keep typing in the filter undisturbed by background refreshes. Remember that the list changed.
+  if (!force && document.activeElement?.id === 'docsSearch') { docsNeedsRender = true; return; }
   if (!remoteMode) {
     box.innerHTML = '<div class="empty-note">Project docs need the desktop app. Open the installed Clankban to read a project folder.</div>';
     return;
@@ -1003,6 +1265,8 @@ function renderDocs(force = false) {
     <div class="docs-header">
       <div class="docs-root"><span class="docs-label">Project folder</span><code>${escapeHtml(projectDocs.root)}</code></div>
       <div class="docs-actions">
+        ${docsRefreshedAt ? `<span class="docs-updated">Updated ${docsRefreshedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>` : ''}
+        <button class="button quiet" data-doc-refresh>Refresh</button>
         <button class="button quiet" data-doc-folder>Change…</button>
         <button class="button quiet" data-doc-clear>Disconnect</button>
       </div>
@@ -1018,6 +1282,26 @@ function renderDocs(force = false) {
           : '<div class="empty-note">Pick a document to read it.</div>'}
       </article>
     </div>`;
+  restoreDocsScroll(box, scroll);
+  docsNeedsRender = false;
+}
+
+// Scroll positions of the page, the document list, and the reader, so a refresh keeps the view.
+function docsScrollPositions(box) {
+  return {
+    page: document.querySelector('.main-content')?.scrollTop ?? 0,
+    list: box.querySelector('.docs-list')?.scrollTop ?? 0,
+    reader: box.querySelector('.docs-reader')?.scrollTop ?? 0,
+  };
+}
+
+function restoreDocsScroll(box, pos) {
+  const page = document.querySelector('.main-content');
+  if (page) page.scrollTop = pos.page;
+  const list = box.querySelector('.docs-list');
+  if (list) list.scrollTop = pos.list;
+  const reader = box.querySelector('.docs-reader');
+  if (reader) reader.scrollTop = pos.reader;
 }
 
 function renderDrawerDocs(task) {
@@ -1072,6 +1356,7 @@ function closeTop() {
   if (isOpen('#workspaceModal')) return closeWorkspaceModal();
   if (isOpen('#paletteBackdrop')) return closePalette();
   if (isOpen('#helpBackdrop')) return closeHelp();
+  if (isOpen('#changelogBackdrop')) return closeNotes();
   if (isOpen('#jsonModalBackdrop')) return $('#jsonModalBackdrop').classList.remove('open');
   if (isOpen('#modalBackdrop')) return closeModal();
   if (isOpen('#taskDrawer')) return closeDrawer();
@@ -1138,6 +1423,7 @@ document.addEventListener('click', e => {
     if (current?.suggestedRoot) return setProjectFolder(current.suggestedRoot);
   }
   if (e.target.closest('[data-dismiss-suggestion]')) return dismissSuggestion();
+  if (e.target.closest('[data-doc-refresh]')) return manualDocsRefresh();
   if (e.target.closest('[data-doc-folder]')) return chooseProjectFolder();
   if (e.target.closest('[data-doc-clear]') && confirm('Disconnect the project folder? Its files stay where they are.')) {
     return setProjectFolder(null);
@@ -1186,6 +1472,12 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('click', e => {
+  const recentTabButton = e.target.closest('[data-recent-tab]');
+  if (recentTabButton) { recentTab = recentTabButton.dataset.recentTab; return render(); }
+  const approveBoard = e.target.closest('[data-approve-board]');
+  if (approveBoard) return decideBoardRequest(approveBoard.dataset.approveBoard, 'approve');
+  const rejectBoard = e.target.closest('[data-reject-board]');
+  if (rejectBoard) return decideBoardRequest(rejectBoard.dataset.rejectBoard, 'reject');
   const skillOption = e.target.closest('.skill-option');
   if (skillOption) return selectSkill(skillOption.dataset.skill);
   const cancelButton = e.target.closest('.cancel-run');
@@ -1221,4 +1513,7 @@ $('#installUpdate').onclick = installUpdate;
 render();
 loadRemoteTasks();
 if (remoteMode) setInterval(loadRemoteTasks, 5000);
+// Project docs refresh every 8 seconds while the Docs tab is open. The folder scan is cheap
+// and the page only redraws when a file changed.
+if (remoteMode) setInterval(docsAutoRefresh, 8000);
 showAppVersion();

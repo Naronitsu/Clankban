@@ -103,6 +103,35 @@ fn take_model(args: &mut Value) -> String {
         .unwrap_or_default()
 }
 
+/// The project folder a tool means: the `path` argument, or the folder the bridge was started in.
+fn project_folder(args: &Value) -> Result<String, String> {
+    match args.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) {
+        Some(path) => Ok(path.to_string()),
+        None => Ok(std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned()),
+    }
+}
+
+/// The board a tool works on: the `workspace` argument when given, otherwise the board connected
+/// to this agent's project folder. Never silently the default board: when no board matches, the
+/// error says what to do and nothing is written.
+async fn resolve_board(args: &Value, base: &str) -> Result<String, String> {
+    if let Some(workspace) = args.get("workspace").and_then(Value::as_str).map(str::trim).filter(|w| !w.is_empty()) {
+        return Ok(workspace.to_string());
+    }
+    let folder = project_folder(&Value::Null)?;
+    let encoded = utf8_percent_encode(&folder, NON_ALPHANUMERIC);
+    let found = http("GET", format!("{base}/api/workspace-match?folder={encoded}"), None, Vec::new()).await?;
+    match found.get("workspace").and_then(|w| w.get("id")).and_then(Value::as_str) {
+        Some(id) => Ok(id.to_string()),
+        None if found.get("pending").map(|p| !p.is_null()).unwrap_or(false) => Err(format!(
+            "A board for this folder ({folder}) is waiting for a person to accept the folder in its Docs tab. Nothing was written. Ask the person to accept it, then try again."
+        )),
+        None => Err(format!(
+            "No board is connected to this folder ({folder}). Nothing was written. Call resolve_workspace to see the boards. Pass `workspace` to use one of them, or ask for a board for this folder with create_workspace and this folder's path. A person approves the request on the board first."
+        )),
+    }
+}
+
 async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, String> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -111,8 +140,8 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
 
     match name {
         "get_agent_context" => {
-            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
-            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let workspace = resolve_board(&args, base).await?;
+            let encoded = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
             let mut context = http(
                 "GET",
                 format!("{base}/api/agent-context?workspace={encoded}"),
@@ -135,7 +164,12 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             let id = required_str(&args, "id")?;
             http("GET", format!("{}/history", task_url(base, id)), None, Vec::new()).await
         }
-        "create_task" => http("POST", format!("{base}/api/tasks"), Some(args), identity).await,
+        "create_task" => {
+            let workspace = resolve_board(&args, base).await?;
+            let mut body = args.clone();
+            body["workspace"] = json!(workspace);
+            http("POST", format!("{base}/api/tasks"), Some(body), identity).await
+        }
         "update_task" => {
             let id = required_str(&args, "id")?.to_string();
             let mut patch = args.clone();
@@ -146,7 +180,7 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
         }
         "list_workspaces" => http("GET", format!("{base}/api/workspaces"), None, Vec::new()).await,
         "suggest_project_folder" => {
-            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
+            let workspace = resolve_board(&args, base).await?;
             // Without a path, suggest the folder the bridge was started in: the project the agent is working on.
             let folder = match args.get("path").and_then(Value::as_str) {
                 Some(path) => path.to_string(),
@@ -155,7 +189,7 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
                     .to_string_lossy()
                     .into_owned(),
             };
-            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let encoded = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
             http(
                 "PUT",
                 format!("{base}/api/workspaces/{encoded}/suggestion"),
@@ -165,14 +199,14 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             .await
         }
         "list_project_docs" => {
-            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
-            let encoded = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let workspace = resolve_board(&args, base).await?;
+            let encoded = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
             http("GET", format!("{base}/api/workspaces/{encoded}/docs"), None, Vec::new()).await
         }
         "read_project_doc" => {
             let path = required_str(&args, "path")?;
-            let workspace = args.get("workspace").and_then(Value::as_str).unwrap_or("default");
-            let encoded_workspace = utf8_percent_encode(workspace, NON_ALPHANUMERIC);
+            let workspace = resolve_board(&args, base).await?;
+            let encoded_workspace = utf8_percent_encode(&workspace, NON_ALPHANUMERIC);
             let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC);
             http(
                 "GET",
@@ -182,9 +216,24 @@ async fn call_tool(base: &str, client: &str, params: &Value) -> Result<Value, St
             )
             .await
         }
+        "resolve_workspace" => {
+            let folder = project_folder(&args)?;
+            let encoded = utf8_percent_encode(&folder, NON_ALPHANUMERIC);
+            http("GET", format!("{base}/api/workspace-match?folder={encoded}"), None, Vec::new()).await
+        }
         "create_workspace" => {
-            let name = required_str(&args, "name")?;
-            http("POST", format!("{base}/api/workspaces"), Some(json!({ "name": name })), identity).await
+            // A folder makes a board for that project. A folder that already has a board returns that board.
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            let path = args.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty());
+            if path.is_none() && name.trim().is_empty() {
+                return Err("name is required".to_string());
+            }
+            let mut body = json!({ "name": name });
+            if let Some(path) = path {
+                body["path"] = json!(path);
+            }
+            // Files a request for a person to approve on the board. No board is created here.
+            http("POST", format!("{base}/api/board-requests"), Some(body), identity).await
         }
         "list_run_requests" => {
             let status = args.get("status").and_then(Value::as_str).unwrap_or("pending");
@@ -270,7 +319,7 @@ async fn http(
 }
 
 const MODEL_NOTE: &str = " Pass `model` with the model you are running as (for example claude-haiku-5-5), so the board history records who made the change.";
-const WORKSPACE_NOTE: &str = " `workspace` is optional and defaults to \"default\".";
+const WORKSPACE_NOTE: &str = " `workspace` is optional: when it is left out, the board connected to this agent's project folder is used. If no board matches, nothing is written and the error says what to do. Call resolve_workspace to see the boards.";
 
 fn tool_definitions() -> Value {
     json!([
@@ -397,15 +446,25 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "create_workspace",
-            "description": format!("Create a separate workspace for another project or area of work. The id is derived from the name.{MODEL_NOTE}"),
+            "name": "resolve_workspace",
+            "description": "Find the board for a project folder. Call this first when unsure which board to use. Without a path, uses the folder this bridge was started in. Returns the matching board, or null with the list of boards.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string" },
+                    "path": { "type": "string", "description": "Project folder. Optional; defaults to the folder the bridge was started in." }
+                }
+            }
+        },
+        {
+            "name": "create_workspace",
+            "description": format!("Ask for a new board. Nothing is created until a person approves the request on the board. Pass `path` (the project folder) for a board for that folder: if the folder already has a board, that board is returned instead. Approved boards suggest the folder; a person accepts it in the Docs tab.{MODEL_NOTE}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Board name. Optional when a path is given; defaults to the folder name." },
+                    "path": { "type": "string", "description": "Project folder for this board." },
                     "model": { "type": "string" }
-                },
-                "required": ["name"]
+                }
             }
         },
         {
@@ -462,7 +521,7 @@ mod tests {
     #[test]
     fn tool_list_includes_workspace_and_history_tools() {
         let names = names();
-        for expected in ["list_workspaces", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
+        for expected in ["list_workspaces", "resolve_workspace", "create_workspace", "get_task_history", "list_project_docs", "read_project_doc"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
     }

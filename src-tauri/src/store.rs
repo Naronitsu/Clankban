@@ -161,6 +161,77 @@ fn read_run(conn: &Connection, id: i64) -> Result<Option<RunRequest>, ApiError> 
     Ok(run)
 }
 
+/// A request from an agent for a new board. Pending until a person approves or rejects it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BoardRequest {
+    pub id: i64,
+    pub name: String,
+    pub folder: Option<String>,
+    #[serde(rename = "requestedBy")]
+    pub requested_by: String,
+    /// `pending`, `approved`, or `rejected`.
+    pub status: String,
+    pub created: String,
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: Option<String>,
+}
+
+/// What asking for a board produced: a board that already exists for the folder, or a request.
+#[derive(Debug, Clone)]
+pub enum BoardRequestResult {
+    Existing(Workspace),
+    Pending { request: BoardRequest, is_new: bool },
+}
+
+const BOARD_REQUEST_COLUMNS: &str = "id, name, folder, requested_by, status, created, workspace_id";
+
+fn row_to_board_request(row: &Row) -> rusqlite::Result<BoardRequest> {
+    Ok(BoardRequest {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        folder: row.get::<_, Option<String>>(2)?.filter(|s| !s.is_empty()),
+        requested_by: row.get(3)?,
+        status: row.get(4)?,
+        created: row.get(5)?,
+        workspace_id: row.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
+    })
+}
+
+fn read_board_request(conn: &Connection, id: i64) -> Result<Option<BoardRequest>, ApiError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {BOARD_REQUEST_COLUMNS} FROM board_requests WHERE id = ?1"),
+            [id],
+            row_to_board_request,
+        )
+        .optional()?)
+}
+
+/// Folder paths compare case-insensitively on Windows, with either slash and no trailing slash.
+fn normalise_folder(path: &str) -> String {
+    let mut text = path.trim().replace('/', "\\").to_lowercase();
+    while text.len() > 3 && text.ends_with('\\') {
+        text.pop();
+    }
+    text
+}
+
+/// True when `folder` is `root` itself or sits somewhere inside it.
+fn folder_is_within(folder: &str, root: &str) -> bool {
+    let folder = normalise_folder(folder);
+    let root = normalise_folder(root);
+    folder == root || folder.starts_with(&format!("{root}\\"))
+}
+
+/// A history entry plus the current title of the task it changed, for the Recent view.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentHistoryEntry {
+    #[serde(flatten)]
+    pub entry: HistoryEntry,
+    #[serde(rename = "taskTitle")]
+    pub task_title: String,
+}
+
 fn row_to_history(row: &Row) -> rusqlite::Result<HistoryEntry> {
     let changes_raw: String = row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "{}".into());
     Ok(HistoryEntry {
@@ -517,6 +588,15 @@ impl Store {
                 summary TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS task_history_by_task ON task_history (task_id, id);
+            CREATE TABLE IF NOT EXISTS board_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                folder TEXT,
+                requested_by TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created TEXT NOT NULL,
+                workspace_id TEXT
+            );
             CREATE TABLE IF NOT EXISTS run_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 skill TEXT NOT NULL,
@@ -669,6 +749,54 @@ impl Store {
         Ok(entries)
     }
 
+    /// The board whose connected project folder holds `folder`. When folders are nested, the most
+    /// specific one wins, so a sub-project gets its own board.
+    pub fn workspace_for_folder(&self, folder: &str) -> Result<Option<Workspace>, ApiError> {
+        let best = self
+            .list_workspaces()?
+            .into_iter()
+            .filter_map(|w| {
+                let root_len = w.project_root.as_deref().filter(|root| folder_is_within(folder, root))?.len();
+                Some((root_len, w))
+            })
+            .max_by_key(|(root_len, _)| *root_len)
+            .map(|(_, w)| w);
+        Ok(best)
+    }
+
+    /// The board that already has this folder connected, or has it suggested. A second board for
+    /// the same folder is refused, so agents do not end up with two boards for one project.
+    pub fn workspace_claiming_folder(&self, folder: &str) -> Result<Option<Workspace>, ApiError> {
+        let target = normalise_folder(folder);
+        let found = self.list_workspaces()?.into_iter().find(|w| {
+            let connected = w.project_root.as_deref().map(normalise_folder);
+            let suggested = w.suggested_root.as_deref().map(normalise_folder);
+            connected.as_deref() == Some(target.as_str()) || suggested.as_deref() == Some(target.as_str())
+        });
+        Ok(found)
+    }
+
+    /// Newest first, across the tasks in one workspace. Each entry carries its task's current title.
+    /// Entries for deleted tasks are left out, because a deleted task no longer belongs to a workspace.
+    pub fn recent_history(&self, workspace: &str, limit: usize) -> Result<Vec<RecentHistoryEntry>, ApiError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.task_id, h.at, h.action, h.actor_kind, h.actor_name, h.actor_model, h.changes, h.summary, t.title
+             FROM task_history h JOIN tasks t ON t.id = h.task_id
+             WHERE t.workspace_id = ?1
+             ORDER BY h.id DESC LIMIT ?2",
+        )?;
+        let entries = stmt
+            .query_map(params![workspace, limit as i64], |row| {
+                Ok(RecentHistoryEntry {
+                    entry: row_to_history(row)?,
+                    task_title: row.get::<_, String>(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(entries)
+    }
+
     pub fn list_workspaces(&self) -> Result<Vec<Workspace>, ApiError> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -807,6 +935,106 @@ impl Store {
         }
         conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
         Ok(())
+    }
+
+    /// An agent asks for a new board. Nothing is created here: a person approves the request on
+    /// the board first. A folder that already has a board returns that board, and a folder that
+    /// already has a pending request returns that request, so nothing is duplicated.
+    pub fn request_board(&self, name: &str, folder: Option<&str>, requested_by: &str) -> Result<BoardRequestResult, ApiError> {
+        let folder = match folder.map(str::trim).filter(|f| !f.is_empty()) {
+            Some(path) => Some(crate::docs::validate_root(path).map_err(ApiError::BadRequest)?),
+            None => None,
+        };
+        if let Some(folder) = &folder {
+            if let Some(existing) = self.workspace_claiming_folder(folder)? {
+                return Ok(BoardRequestResult::Existing(existing));
+            }
+        }
+        let name = match (name.trim(), &folder) {
+            ("", Some(folder)) => Path::new(folder)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Project".into()),
+            ("", None) => return Err(ApiError::BadRequest("a name or a project folder is required".into())),
+            (name, _) => name.to_string(),
+        };
+        let conn = self.lock();
+        let pending = match &folder {
+            Some(folder) => conn
+                .query_row(
+                    &format!("SELECT {BOARD_REQUEST_COLUMNS} FROM board_requests WHERE folder = ?1 AND status = 'pending' ORDER BY id DESC LIMIT 1"),
+                    [folder],
+                    row_to_board_request,
+                )
+                .optional()?,
+            None => None,
+        };
+        if let Some(request) = pending {
+            return Ok(BoardRequestResult::Pending { request, is_new: false });
+        }
+        conn.execute(
+            "INSERT INTO board_requests (name, folder, requested_by, status, created) VALUES (?1, ?2, ?3, 'pending', ?4)",
+            params![name, folder, requested_by, now_iso()],
+        )?;
+        let id = conn.last_insert_rowid();
+        let request = read_board_request(&conn, id)?.ok_or(ApiError::NotFound)?;
+        Ok(BoardRequestResult::Pending { request, is_new: true })
+    }
+
+    /// Requests newest first. `pending_only` limits the list to requests still waiting for a person.
+    pub fn list_board_requests(&self, pending_only: bool) -> Result<Vec<BoardRequest>, ApiError> {
+        let conn = self.lock();
+        let filter = if pending_only { "WHERE status = 'pending'" } else { "" };
+        let mut stmt = conn.prepare(&format!("SELECT {BOARD_REQUEST_COLUMNS} FROM board_requests {filter} ORDER BY id DESC"))?;
+        let rows = stmt.query_map([], row_to_board_request)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// A person approves a request: the board is created with the folder suggested, and a person
+    /// still accepts the folder before it connects. If the folder got a board meanwhile, that board is used.
+    pub fn approve_board_request(&self, id: i64) -> Result<(BoardRequest, Workspace), ApiError> {
+        let request = {
+            let conn = self.lock();
+            read_board_request(&conn, id)?.ok_or(ApiError::NotFound)?
+        };
+        if request.status != "pending" {
+            return Err(ApiError::Conflict(format!("request {id} was already {}", request.status)));
+        }
+        let existing = match &request.folder {
+            Some(folder) => self.workspace_claiming_folder(folder)?,
+            None => None,
+        };
+        let workspace = match existing {
+            Some(workspace) => workspace,
+            None => {
+                let created = self.create_workspace(&request.name)?;
+                if let Some(folder) = &request.folder {
+                    self.suggest_project_root(&created.id, folder, &request.requested_by)?;
+                }
+                self.list_workspaces()?
+                    .into_iter()
+                    .find(|w| w.id == created.id)
+                    .ok_or(ApiError::NotFound)?
+            }
+        };
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE board_requests SET status = 'approved', workspace_id = ?2 WHERE id = ?1",
+            params![id, workspace.id],
+        )?;
+        let decided = read_board_request(&conn, id)?.ok_or(ApiError::NotFound)?;
+        Ok((decided, workspace))
+    }
+
+    /// A person declines a request. Nothing is created.
+    pub fn reject_board_request(&self, id: i64) -> Result<BoardRequest, ApiError> {
+        let conn = self.lock();
+        let request = read_board_request(&conn, id)?.ok_or(ApiError::NotFound)?;
+        if request.status != "pending" {
+            return Err(ApiError::Conflict(format!("request {id} was already {}", request.status)));
+        }
+        conn.execute("UPDATE board_requests SET status = 'rejected' WHERE id = ?1", [id])?;
+        read_board_request(&conn, id)?.ok_or(ApiError::NotFound)
     }
 
     pub fn create_run(&self, skill: &str, arguments: &Value) -> Result<RunRequest, ApiError> {
@@ -1066,6 +1294,106 @@ mod tests {
         assert_eq!(home_tasks[0].id, in_home.id);
         assert_eq!(store.list(Some(DEFAULT_WORKSPACE)).unwrap().len(), SEED.len() + 1);
         assert_eq!(store.list(None).unwrap().len(), SEED.len() + 2);
+    }
+
+    #[test]
+    fn agent_board_requests_wait_for_approval() {
+        let store = Store::open_in_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("clankban-request-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let folder = std::fs::canonicalize(&dir).unwrap().to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        let boards_before = store.list_workspaces().unwrap().len();
+
+        // Asking creates a request, not a board.
+        let garden = match store.request_board("Garden", None, "agent").unwrap() {
+            BoardRequestResult::Pending { request, is_new } => {
+                assert!(is_new);
+                request
+            }
+            other => panic!("expected a pending request, got {other:?}"),
+        };
+        assert_eq!(garden.status, "pending");
+        assert_eq!(store.list_workspaces().unwrap().len(), boards_before, "no board until a person approves");
+
+        // The same folder asked twice gives the same pending request.
+        let first = match store.request_board("", Some(&folder), "agent").unwrap() {
+            BoardRequestResult::Pending { request, is_new: true } => request,
+            other => panic!("expected a new request, got {other:?}"),
+        };
+        match store.request_board("", Some(&folder), "agent").unwrap() {
+            BoardRequestResult::Pending { request, is_new } => {
+                assert!(!is_new);
+                assert_eq!(request.id, first.id);
+            }
+            other => panic!("expected the same request, got {other:?}"),
+        }
+
+        // Rejecting creates nothing, and a decided request cannot be decided again.
+        assert_eq!(store.reject_board_request(garden.id).unwrap().status, "rejected");
+        assert!(matches!(store.reject_board_request(garden.id), Err(ApiError::Conflict(_))));
+        assert_eq!(store.list_workspaces().unwrap().len(), boards_before);
+
+        // Approving creates the board with the folder suggested, not connected.
+        let (decided, board) = store.approve_board_request(first.id).unwrap();
+        assert_eq!(decided.status, "approved");
+        assert_eq!(decided.workspace_id.as_deref(), Some(board.id.as_str()));
+        assert_eq!(board.suggested_root.as_deref(), Some(folder.as_str()));
+        assert_eq!(board.project_root, None);
+        assert_eq!(store.list_workspaces().unwrap().len(), boards_before + 1);
+
+        // Once the folder has a board, asking for it returns that board.
+        match store.request_board("", Some(&folder), "agent").unwrap() {
+            BoardRequestResult::Existing(existing) => assert_eq!(existing.id, board.id),
+            other => panic!("expected the existing board, got {other:?}"),
+        }
+        assert!(store.list_board_requests(true).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_resolve_to_their_most_specific_board() {
+        let store = Store::open_in_memory().unwrap();
+        let base = std::env::temp_dir().join(format!("clankban-match-{}", std::process::id()));
+        let nested = base.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        // Compare against canonical paths, as the store saves them (without the \\?\ prefix).
+        let plain = |p: &std::path::Path| {
+            let text = std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+            text.trim_start_matches(r"\\?\").to_string()
+        };
+        let (base_path, nested_path) = (plain(&base), plain(&nested));
+        let outer = store.create_workspace("Outer").unwrap();
+        let inner = store.create_workspace("Inner").unwrap();
+        store.set_project_root(&outer.id, Some(&base_path)).unwrap();
+        store.set_project_root(&inner.id, Some(&nested_path)).unwrap();
+
+        let owner = |folder: &str| store.workspace_for_folder(folder).unwrap().map(|w| w.id);
+        assert_eq!(owner(&format!("{nested_path}\\src")), Some(inner.id.clone()));
+        assert_eq!(owner(&base_path), Some(outer.id.clone()));
+        assert_eq!(owner(&format!("{}\\", base_path.to_uppercase())), Some(outer.id.clone()));
+        assert_eq!(owner(&format!("{base_path}-other")), None, "a folder that only shares a prefix is not inside");
+
+        assert_eq!(store.workspace_claiming_folder(&base_path).unwrap().map(|w| w.id), Some(outer.id.clone()));
+        assert!(store.workspace_claiming_folder(&format!("{base_path}-other")).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn recent_history_is_newest_first_and_stays_in_its_workspace() {
+        let store = Store::open_in_memory().unwrap();
+        let garden = store.create_workspace("Garden").unwrap();
+        let mow = store.create(&obj(json!({ "title": "Mow", "workspace": garden.id })), &who()).unwrap();
+        store.create(&obj(json!({ "title": "Elsewhere" })), &who()).unwrap();
+        store.update(&mow.id, &obj(json!({ "status": "progress" })), &agent("model-c")).unwrap();
+
+        let recent = store.recent_history(&garden.id, 10).unwrap();
+        assert!(recent.iter().all(|e| e.entry.task_id == mow.id));
+        assert_eq!(recent[0].entry.action, "updated");
+        assert_eq!(recent[0].entry.actor_model, "model-c");
+        assert_eq!(recent[0].task_title, "Mow");
+        assert_eq!(recent.last().unwrap().entry.action, "created");
+        assert_eq!(store.recent_history(&garden.id, 1).unwrap().len(), 1);
+        assert!(store.recent_history(DEFAULT_WORKSPACE, 50).unwrap().iter().all(|e| e.entry.task_id != mow.id));
     }
 
     #[test]
