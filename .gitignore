@@ -5,9 +5,10 @@ dist/
 # Local board backups contain task data; keep them out of version control
 backups/
 
-# Rust build output (see app/.gitignore for the full list)
-app/target/
-app/target-*/
+# Rust build output (see src-tauri/.gitignore for the full list)
+src-tauri/target/
+src-tauri/target-*/
+src-tauri/gen/
 
 # Release output from scripts/release.ps1
 release/

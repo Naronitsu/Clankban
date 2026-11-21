@@ -15,36 +15,25 @@ Clankban is a local-first desktop task workspace for humans and coding agents. R
 
 ## Local commands
 
-The desktop app is native Rust (Slint) in `app/`. Run these from `app`:
+The canonical runtime is the Rust/Tauri app in `src-tauri/`. Run these from `src-tauri`:
 
 ```powershell
-cargo run                 # desktop app (API on 127.0.0.1:4187 starts with it)
+cargo tauri dev           # desktop app (Tauri window + API on 127.0.0.1:4187)
 cargo run -- --api        # headless API on 127.0.0.1:4187
 cargo run -- --mcp        # stdio MCP bridge (uses CLANKBAN_API_URL if set)
-cargo test                # unit tests
-cargo build --release     # release exe
-```
-
-Release, from the project root (builds, signs, and writes files; does not publish):
-
-```powershell
-.\scripts\release.ps1 -Version 0.2.0
+cargo test                # store unit tests
+cargo tauri build         # Windows NSIS installer
 ```
 
 When testing Claude Code against the desktop app, keep Clankban open and configure the MCP process with `CLANKBAN_API_URL=http://127.0.0.1:4187`.
 
 ## Important files
 
-- `app/src/main.rs` — entry point: window, `--api`, `--mcp`, and `--verify-update`.
-- `app/src/gui.rs` — window logic: models, callbacks, refresh timer.
-- `app/ui/app.slint` — the window layout and components.
-- `app/src/presenter.rs` — filtering, sorting, labels, and stats (pure, unit tested).
-- `app/src/store.rs` — SQLite schema, seed data, normalisation, parent inference, run queue.
-- `app/src/api.rs` — HTTP API routes (same contract as the original Node server).
-- `app/src/mcp.rs` — stdio MCP server: agent tools.
-- `app/src/skills.rs` and `app/skills/*.md` — import, update, and review workflows.
-- `app/src/updater.rs` — signed-manifest update check and install.
-- `app/installer/clankban.nsi` — Windows installer.
-- `scripts/release.ps1` — release build, installer, signature, and manifest.
+- `src-tauri/src/main.rs` — app entry: Tauri window, headless `--api`, and `--mcp` modes.
+- `src-tauri/src/store.rs` — SQLite schema, seed data, normalisation, parent inference, unit tests.
+- `src-tauri/src/api.rs` — HTTP API routes (same contract as the Node server).
+- `src-tauri/src/mcp.rs` — stdio MCP server exposing the four agent tools.
+- `src-tauri/tauri.conf.json` — Tauri app and installer configuration.
+- `ui/index.html`, `ui/styles.css`, `ui/app.js` — human-facing board UI, shared by Tauri and Electron.
 - `docs/ARCHITECTURE.md` — system design and data contracts.
 - `docs/TASKS.md` — product roadmap and implementation tasks.

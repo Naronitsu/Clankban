@@ -3,3 +3,5 @@
 # Separate build folders used while the app or API was running
 /target-*/
 
+# Tauri-generated schemas (regenerated on each build)
+/gen/

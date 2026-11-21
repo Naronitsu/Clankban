@@ -1,47 +1,48 @@
 # Clankban
 
-Clankban is a local-first, visual task board for humans and agentic AI. It runs entirely on your machine: a native Rust desktop app (Slint) with a local SQLite database, a loopback HTTP API, and an MCP bridge for coding agents.
+Clankban is a local-first, visual task board for humans and agentic AI. It runs entirely on your machine: a Rust desktop app (Tauri) with a local SQLite database, a loopback HTTP API, and an MCP bridge for coding agents.
 
 ## Install (Windows)
 
-Run `Clankban_<version>_x64-setup.exe` from the latest GitHub release. It installs for your user account, with no admin rights needed. The installer is unsigned, so Windows SmartScreen may warn on first launch. The portable `Clankban-<version>-portable.exe` runs without installing.
+Build the installer once, then run it:
 
-Your board is stored in `%APPDATA%\clankban\clankban.sqlite`. Set `CLANKBAN_DATA_DIR` to use a different folder.
+```powershell
+cd src-tauri
+cargo tauri build
+```
+
+Run `src-tauri\target\release\bundle\nsis\Clankban_0.1.0_x64-setup.exe`. The installer is unsigned, so Windows SmartScreen may warn on first launch.
 
 ### Updates
 
-Clankban checks for updates a few seconds after it starts. You can also press **Check for updates** in the sidebar. When a newer release exists, **Install** downloads it, checks its signature against the key built into the app, and runs the installer silently. Clankban restarts afterwards. A download whose signature doesn't match is refused. The portable exe doesn't update itself.
+The desktop app checks for updates at startup, and you can check manually with **Check for updates** in the sidebar. When a newer release is available, **Install** downloads it, verifies its signature, installs it, and restarts Clankban. Updates only apply to the installed version, not the portable exe.
 
-## Build from source
+Your data is stored in `%APPDATA%\clankban\clankban.sqlite`. Set `CLANKBAN_DATA_DIR` to use a different folder.
 
-Prerequisites:
+### Prerequisites for building
 
 - Rust (stable), installed with `rustup`.
 - Visual Studio 2022 Build Tools with the "Desktop development with C++" workload.
-- NSIS, only for building the installer. The release script looks for it in the Tauri CLI's download location.
+- Microsoft Edge WebView2 Runtime (already installed on Windows 11).
+- Tauri CLI, once: `cargo install tauri-cli --version "^2" --locked`.
 
-From the `app` folder:
+## Run in development
 
-```powershell
-cargo run               # open the desktop app
-cargo test              # run the unit tests
-cargo build --release   # build clankban.exe
-```
-
-To build a release, run this from the project root. It writes the installer, signature, manifest, and portable exe to `release\v<version>`. It doesn't publish anything:
+From `src-tauri`:
 
 ```powershell
-.\scripts\release.ps1 -Version 0.2.0
+cargo tauri dev
 ```
+
+To open the board without building, double-click `start-local.ps1`. This is the browser-only prototype, which stores data in `localStorage` and not in the desktop database.
 
 ## Command-line modes
 
 The same binary also runs without a window:
 
 ```powershell
-clankban.exe --api                          # headless local API on 127.0.0.1:4187
-clankban.exe --mcp                          # stdio MCP bridge for coding agents
-clankban.exe --verify-update <setup.exe> <setup.exe.sig>   # check an installer's signature
+cargo run -- --api    # headless local API on 127.0.0.1:4187
+cargo run -- --mcp    # stdio MCP bridge for coding agents
 ```
 
 Set `CLANKBAN_PORT` to change the API port.
@@ -50,33 +51,22 @@ Set `CLANKBAN_PORT` to change the API port.
 
 Start the desktop app (or `--api`), then configure the agent to launch the bridge with `--mcp` and point it at the running API:
 
-- Command: `clankban.exe` with the argument `--mcp` (or `cargo run -- --mcp` from `app`).
+- Command: the built `clankban.exe` (or `cargo run` from `src-tauri`), with the argument `--mcp`
 - Environment: `CLANKBAN_API_URL=http://127.0.0.1:4187`
 
-The bridge exposes:
-
-- Tools: `get_agent_context`, `get_task`, `create_task`, `update_task`, `list_run_requests`, `complete_run_request`.
-- Prompts: `import_tasks`, `update_tasks`, `review_tasks`.
-
-Use `get_agent_context` for planning so agents don't load the whole board.
-
-## Agent runs
-
-The **Agent runs** view sends a skill to a connected agent. Clicking **Send to agent** queues a request on the board. The agent picks it up with `list_run_requests`, follows the prompt, and reports back with `complete_run_request`. Requests run only when an agent checks the queue, and the agent still asks for your approval before changing anything.
+The bridge exposes `get_agent_context`, `get_task`, `create_task`, and `update_task`. Use `get_agent_context` for planning so agents don't load the whole board.
 
 ## What is included
 
-- Board with Backlog, In progress, In review, and Done columns, plus List and Recent views.
-- Epics, tasks, subtasks, and bug fixes with stable `AT-###` identifiers, and parent-child links.
-- Create, edit, inspect, delete, search, filter, sort, and tick off subtasks.
-- Command menu (Ctrl+K), keyboard shortcuts, and a "Copy agent JSON" snapshot.
-- Agent runs view and the request queue.
-- Local SQLite persistence, a loopback API at `127.0.0.1`, and the MCP bridge.
-- Signed in-app updates.
+- Kanban board with Backlog, In progress, In review, and Done columns.
+- Epics, tasks, subtasks, and bug fixes with stable `AT-###` identifiers.
+- Create, edit, inspect, delete, search, sort, and complete subtasks.
+- "Copy agent JSON" view exposing a canonical, machine-readable board snapshot.
+- Local SQLite persistence and a loopback API at `127.0.0.1` for desktop and headless use.
+- MCP stdio bridge for coding agents.
 
 ## Agent API
 
 - `GET /api/agent-context`: compact active-work context (the default for planning).
 - `GET /api/tasks`, `GET /api/tasks/:id`, `POST /api/tasks`, `PATCH /api/tasks/:id`, `DELETE /api/tasks/:id`: full task access.
-- `GET /api/skills`, `GET /api/run-requests`, `POST /api/run-requests`, `PATCH /api/run-requests/:id`: skills and the request queue.
 - `GET /api/health`: liveness check.
